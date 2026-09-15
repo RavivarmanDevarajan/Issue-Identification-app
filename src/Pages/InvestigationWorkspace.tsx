@@ -18,6 +18,8 @@ import type {
   SchemaResponse,
 } from "../components/filterTypes";
 
+import type { ASGTrend } from "../App";
+
 /* ======================================================
    TYPES
 ====================================================== */
@@ -59,6 +61,18 @@ interface DatasetPayload {
 interface Props {
   datasetId: number;
   navigate: any;
+  onFlagTrend: (payload: {
+    title: string;
+    category: string;
+    datasetId?: number;
+    datasetName?: string;
+    description?: string;
+    dateBy?: string;
+    colorBy?: string;
+    eventCount?: number;
+    filters?: FieldFilter[];
+  }) => void;
+  initialASG?: ASGTrend | null;
 }
 
 /* ======================================================
@@ -1169,6 +1183,8 @@ function generateLocalTimeline(
 export default function InvestigationWorkspace({
   datasetId,
   navigate,
+  onFlagTrend,
+  initialASG,
 }: Props) {
 
   /* ====================================================
@@ -1462,13 +1478,41 @@ export default function InvestigationWorkspace({
   ==================================================== */
 
   useEffect(() => {
+    if (initialASG?.datasetId === datasetId) {
+      return;
+    }
 
     setDateBy("");
     setColorBy("");
     setFilters([]);
     setFiltersApplied(false);
+  }, [datasetId, initialASG?.id]);
 
-  }, [datasetId]);
+  /* ====================================================
+     RESTORE SAVED ASG INVESTIGATION
+  ==================================================== */
+
+  useEffect(() => {
+    if (!schema) {
+      return;
+    }
+
+    if (!initialASG || initialASG.datasetId !== datasetId) {
+      return;
+    }
+
+    setDateBy(initialASG.dateBy || "");
+    setColorBy(initialASG.colorBy || "");
+    setFilters(
+      Array.isArray(initialASG.filters)
+        ? initialASG.filters
+        : []
+    );
+    setFiltersApplied(
+      Array.isArray(initialASG.filters) &&
+      initialASG.filters.length > 0
+    );
+  }, [schema, datasetId, initialASG?.id]);
 
   /* ====================================================
      VALIDATE TIME CONFIGURATION
@@ -2446,69 +2490,41 @@ export default function InvestigationWorkspace({
      SAVE ASG
   ==================================================== */
 
-  async function saveAsg(
+  function saveAsg(
     title: string,
     category: string
   ) {
-
     try {
-
       setSavingAsg(true);
       setSaveAsgError("");
 
-      const response =
-        await fetch(
-          "http://localhost:5000/asgs",
-          {
-            method: "POST",
-            headers: {
-              "Content-Type":
-                "application/json",
-            },
-            body: JSON.stringify({
-              title,
-              category,
-              datasetId,
-              datasetName:
-                logicalDatasetName,
-              dateBy,
-              colorBy,
-              eventCount:
-                filteredEventCount,
-              filters:
-                getValidFilters(
-                  filters
-                ),
-            }),
-          }
-        );
+      const validFilters =
+        getValidFilters(filters);
 
-      const payload =
-        await response.json();
-
-      if (!payload.success) {
-        throw new Error(
-          payload.message ||
-            "Failed to save ASG"
-        );
-      }
+      onFlagTrend({
+        title: title.trim(),
+        category,
+        datasetId,
+        datasetName:
+          logicalDatasetName,
+        dateBy: dateBy || undefined,
+        colorBy: colorBy || undefined,
+        eventCount:
+          filteredEventCount,
+        filters: validFilters,
+      });
 
       setSaveAsgOpen(false);
       setSaveAsgSuccess(
-        `Saved ${payload.asg.asg_number}: ${payload.asg.title}`
+        `Saved ASG: ${title.trim()}`
       );
-
     } catch (error: any) {
-
       setSaveAsgError(
-        error.message ||
+        error?.message ||
           "Failed to save ASG"
       );
-
     } finally {
-
       setSavingAsg(false);
-
     }
   }
 
@@ -2562,6 +2578,93 @@ export default function InvestigationWorkspace({
           setSaveAsgOpen(true);
         }}
       />
+
+      {/* ==================================================
+          ASG VIEW HEADER
+      ================================================== */}
+
+      {initialASG &&
+        initialASG.datasetId === datasetId && (
+          <div
+            style={{
+              background: "#172554",
+              borderBottom: "1px solid #1e40af",
+              padding: "10px 20px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              flexWrap: "wrap",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                flexWrap: "wrap",
+              }}
+            >
+              <span
+                style={{
+                  background: "#1d4ed8",
+                  color: "white",
+                  padding: "5px 9px",
+                  borderRadius: 6,
+                  fontSize: 12,
+                  fontWeight: 700,
+                }}
+              >
+                Flagged ASG
+              </span>
+
+              <span
+                style={{
+                  color: "#dbeafe",
+                  fontSize: 13,
+                  fontWeight: 600,
+                }}
+              >
+                {initialASG.number}: {initialASG.title}
+              </span>
+
+              <span
+                style={{
+                  color: "#93c5fd",
+                  fontSize: 12,
+                }}
+              >
+                Category: {initialASG.category}
+              </span>
+
+              <span
+                style={{
+                  color: "#bfdbfe",
+                  fontSize: 12,
+                }}
+              >
+                Status: {initialASG.status || "Detect"}
+              </span>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => navigate("asgs")}
+              style={{
+                background: "#0f172a",
+                color: "#e2e8f0",
+                border: "1px solid #475569",
+                borderRadius: 6,
+                padding: "7px 12px",
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              Back to ASGs
+            </button>
+          </div>
+        )}
 
       {/* ==================================================
           LOGICAL DATASET HEADER
