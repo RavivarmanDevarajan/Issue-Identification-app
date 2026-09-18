@@ -11,10 +11,13 @@ import DataIngestion from "./Pages/DataIngestion";
 import Investigation from "./Pages/Investigation";
 import InvestigationWorkspace from "./Pages/InvestigationWorkspace";
 import Asgs from "./Pages/Asgs";
+import Sidebar from "./components/Sidebar";
 
 import type {
   FieldFilter,
-} from "./Pages/filterTypes";
+} from "./components/filterTypes";
+
+import { findDuplicateASG } from "./components/asgHelpers";
 
 type Page =
   | "home"
@@ -32,6 +35,12 @@ export type ASGStatus =
   | "Investigate"
   | "Resolved"
   | "CAPA Implemented";
+
+export interface CountermeasureAction {
+  date: string;
+  title?: string;
+  description?: string;
+}
 
 export interface ASGTrend {
   id: string;
@@ -59,6 +68,8 @@ export interface ASGTrend {
 
   filters?: FieldFilter[];
 
+  countermeasure?: CountermeasureAction;
+
   status: ASGStatus;
 
   createdAt: string;
@@ -78,6 +89,18 @@ export interface ASGCreatePayload {
 
   eventCount?: number;
   filters?: FieldFilter[];
+
+  countermeasure?: CountermeasureAction;
+}
+
+/*
+  An ASG is rejected when another ASG already flags the
+  same dataset with the same filters, because both
+  would describe the same issue.
+*/
+export interface ASGCreateResult {
+  created: boolean;
+  duplicate?: ASGTrend;
 }
 
 /* ======================================================
@@ -153,7 +176,7 @@ function getParentDatasetId(
   if (
     value === undefined ||
     value === null ||
-    value === ""
+    (value as any) === ""
   ) {
     return null;
   }
@@ -1143,6 +1166,52 @@ function mergeDatasetPayloads(
    ASG NORMALIZATION
 ====================================================== */
 
+function normalizeCountermeasure(
+  value: any
+): CountermeasureAction | undefined {
+  if (
+    !value ||
+    typeof value !== "object"
+  ) {
+    return undefined;
+  }
+
+  const date =
+    value.date != null
+      ? String(value.date)
+      : "";
+
+  /*
+    A countermeasure without a date cannot be
+    placed on the timeline, so it is dropped.
+  */
+  if (!date) {
+    return undefined;
+  }
+
+  const title =
+    value.title != null
+      ? String(value.title)
+      : "";
+
+  const description =
+    value.description != null
+      ? String(
+          value.description
+        )
+      : "";
+
+  return {
+    date,
+
+    title:
+      title || undefined,
+
+    description:
+      description || undefined,
+  };
+}
+
 function normalizeASG(
   value: any
 ): ASGTrend | null {
@@ -1273,6 +1342,11 @@ function normalizeASG(
       )
         ? value.filters
         : undefined,
+
+    countermeasure:
+      normalizeCountermeasure(
+        value.countermeasure
+      ),
 
     status,
 
@@ -1747,9 +1821,48 @@ function App() {
      CREATE ASG
   ==================================================== */
 
+  /*
+    Finds the ASG that already flags this dataset with
+    this exact set of filters, if there is one.
+  */
+  const findExistingASG =
+    useCallback(
+      (
+        datasetId: number | undefined,
+        datasetName: string | undefined,
+        filters: FieldFilter[]
+      ) =>
+        findDuplicateASG(
+          asgs,
+          datasetId,
+          datasetName,
+          filters
+        ),
+      [asgs]
+    );
+
   function addASG(
     payload: ASGCreatePayload
-  ) {
+  ): ASGCreateResult {
+    /*
+      Two ASGs with the same dataset and filters would
+      describe the same issue, so the second one is
+      rejected and the existing one is reported back.
+    */
+    const duplicate =
+      findExistingASG(
+        payload.datasetId,
+        payload.datasetName,
+        payload.filters || []
+      );
+
+    if (duplicate) {
+      return {
+        created: false,
+        duplicate,
+      };
+    }
+
     setAsgs(
       (currentASGs) => {
         let highestNumber =
@@ -1838,6 +1951,9 @@ function App() {
           filters:
             payload.filters,
 
+          countermeasure:
+            payload.countermeasure,
+
           status:
             "Detect",
 
@@ -1851,6 +1967,10 @@ function App() {
         ];
       }
     );
+
+    return {
+      created: true,
+    };
   }
 
   /* ====================================================
@@ -1987,144 +2107,101 @@ function App() {
   ==================================================== */
 
   return (
-    <div className="page-container">
-      <div className="page-content">
+    <div className="app-container">
+      <Sidebar
+        currentPage={page}
+        navigate={(nextPage: Page) => {
+          if (nextPage === "investigate") {
+            startInvestigation();
+          }
+          setPage(nextPage);
+        }}
+        selectedDatasetName={
+          selectedASG?.datasetName ||
+          (selectedDatasetId !== null ? `Dataset #${selectedDatasetId}` : null)
+        }
+        selectedASGTitle={selectedASG?.title}
+      />
 
-        {/* ==================================================
-            HOME
-        ================================================== */}
+      <div className="app-main-content">
+        <div className="page-content">
 
-        {page === "home" && (
-          <Home
-            navigate={(
-              nextPage: Page
-            ) => {
-              if (
-                nextPage ===
-                "investigate"
-              ) {
-                startInvestigation();
-              }
+          {/* ==================================================
+              HOME
+          ================================================== */}
 
-              setPage(
-                nextPage
-              );
-            }}
-          />
-        )}
-
-        {/* ==================================================
-            DATA INGESTION
-        ================================================== */}
-
-        {page ===
-          "ingestion" && (
-          <DataIngestion
-            navigate={
-              setPage
-            }
-          />
-        )}
-
-        {/* ==================================================
-            INVESTIGATION
-        ================================================== */}
-
-        {page ===
-          "investigate" && (
-          <Investigation
-            navigate={(
-              nextPage: Page
-            ) => {
-              if (
-                nextPage ===
-                "workspace"
-              ) {
-                startInvestigation();
-              }
-
-              setPage(
-                nextPage
-              );
-            }}
-            setSelectedDatasetId={(
-              id
-            ) => {
-              /*
-                Selecting a dataset from the
-                normal Investigation page means
-                this is NOT an ASG restore.
-              */
-              setSelectedASG(
-                null
-              );
-
-              setSelectedDatasetId(
-                id
-              );
-            }}
-          />
-        )}
-
-        {/* ==================================================
-            INVESTIGATION WORKSPACE
-        ================================================== */}
-
-        {page ===
-          "workspace" &&
-          selectedDatasetId !==
-            null && (
-            <InvestigationWorkspace
-              datasetId={
-                selectedDatasetId
-              }
-              navigate={(
-                nextPage: Page
-              ) => {
-                setPage(
-                  nextPage
-                );
+          {page === "home" && (
+            <Home
+              navigate={(nextPage: Page) => {
+                if (nextPage === "investigate") {
+                  startInvestigation();
+                }
+                setPage(nextPage);
               }}
-              onFlagTrend={
-                addASG
-              }
-              initialASG={
-                selectedASG
-              }
             />
           )}
 
-        {/* ==================================================
-            ASGs
-        ================================================== */}
+          {/* ==================================================
+              DATA INGESTION
+          ================================================== */}
 
-        {page ===
-          "asgs" && (
-          <Asgs
-            navigate={
-              setPage
-            }
-            asgs={
-              asgs
-            }
-            deleteASG={
-              deleteASG
-            }
-            updateASG={
-              updateASG
-            }
-            onOpenASG={
-              openASG
-            }
-            getASGEventCount={
-              getASGEventCount
-            }
-            dynamicEventCounts={
-              asgEventCounts
-            }
-          />
-        )}
+          {page === "ingestion" && (
+            <DataIngestion navigate={setPage} />
+          )}
 
+          {/* ==================================================
+              INVESTIGATION
+          ================================================== */}
+
+          {page === "investigate" && (
+            <Investigation
+              navigate={(nextPage: Page) => {
+                if (nextPage === "workspace") {
+                  startInvestigation();
+                }
+                setPage(nextPage);
+              }}
+              setSelectedDatasetId={(id) => {
+                setSelectedASG(null);
+                setSelectedDatasetId(id);
+              }}
+            />
+          )}
+
+          {/* ==================================================
+              INVESTIGATION WORKSPACE
+          ================================================== */}
+
+          {page === "workspace" && selectedDatasetId !== null && (
+            <InvestigationWorkspace
+              datasetId={selectedDatasetId}
+              navigate={(nextPage: Page) => {
+                setPage(nextPage);
+              }}
+              onFlagTrend={addASG}
+              onUpdateASG={updateASG}
+              findExistingASG={findExistingASG}
+              initialASG={selectedASG}
+            />
+          )}
+
+          {/* ==================================================
+              ASGs
+          ================================================== */}
+
+          {page === "asgs" && (
+            <Asgs
+              navigate={setPage}
+              asgs={asgs}
+              deleteASG={deleteASG}
+              updateASG={updateASG}
+              onOpenASG={openASG}
+              getASGEventCount={getASGEventCount}
+              dynamicEventCounts={asgEventCounts}
+            />
+          )}
+
+        </div>
       </div>
     </div>
   );

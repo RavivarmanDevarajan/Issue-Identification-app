@@ -771,24 +771,12 @@ export default function CategoricalFilter({
         </select>
 
         <button
-
           style={{
-
             ...smallButton,
-
-            background:
-              selectedOnly
-                ? "#2563eb"
-                : "#334155",
-
+            background: selectedOnly ? "var(--accent-cyan)" : "var(--bg-card-active)",
+            color: selectedOnly ? "#000000" : "var(--text-primary)",
           }}
-
-          onClick={() =>
-            setSelectedOnly(
-              !selectedOnly
-            )
-          }
-
+          onClick={() => setSelectedOnly(!selectedOnly)}
         >
 
           ✓ Selected

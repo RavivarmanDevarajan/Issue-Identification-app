@@ -332,9 +332,9 @@ const handleDrop = (
       style={{
         width: 360,
         minWidth: 360,
-        background: "#0f172a",
+        background: "var(--bg-main)",
         borderRight:
-          "1px solid #334155",
+          "1px solid var(--border-subtle)",
         display: "flex",
         flexDirection: "column",
         overflowY: "auto",
@@ -350,13 +350,13 @@ const handleDrop = (
           )
         }
         style={{
-          padding: 20,
+          padding: "16px 20px",
           display: "flex",
           justifyContent:
             "space-between",
           alignItems: "center",
           borderBottom:
-            "1px solid #334155",
+            "1px solid var(--border-subtle)",
           cursor: "pointer",
         }}
       >
@@ -373,6 +373,9 @@ const handleDrop = (
           <h3
             style={{
               margin: 0,
+              color: "var(--text-primary)",
+              fontSize: 15,
+              fontWeight: 600,
             }}
           >
             Set A
@@ -384,15 +387,18 @@ const handleDrop = (
             <span
               style={{
                 background:
-                  "#2563eb",
+                  "rgba(0, 229, 255, 0.15)",
                 color:
-                  "white",
+                  "var(--accent-cyan)",
+                border:
+                  "1px solid rgba(0, 229, 255, 0.3)",
                 borderRadius:
                   20,
                 padding:
-                  "3px 8px",
+                  "2px 8px",
                 fontSize:
                   11,
+                fontWeight: 600,
               }}
             >
               {
@@ -530,9 +536,9 @@ const handleDrop = (
                     key={filter.field}
                     style={{
                       background:
-                        "#1e293b",
+                        "var(--bg-card)",
                       border:
-                        "1px solid #334155",
+                        "1px solid var(--border-subtle)",
                       borderRadius: 8,
                       marginBottom: 12,
                       overflow: "hidden",

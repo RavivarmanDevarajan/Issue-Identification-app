@@ -648,633 +648,164 @@ export default function Investigation({
   ======================================================= */
 
   return (
-    <div
-      style={{
-        width:
-          "100%",
-        minHeight:
-          "100vh",
-        background:
-          "#0f172a",
-        color:
-          "white",
-        display:
-          "flex",
-        flexDirection:
-          "column",
-      }}
-    >
-
-      {/* =================================================
-          HEADER
-      ================================================= */}
-
-      <div
-        style={{
-          height:
-            80,
-          display:
-            "flex",
-          alignItems:
-            "center",
-          justifyContent:
-            "space-between",
-          padding:
-            "0 35px",
-          background:
-            "#111827",
-          borderBottom:
-            "1px solid #334155",
-        }}
-      >
-
-        <div
-          style={{
-            display:
-              "flex",
-            alignItems:
-              "center",
-            gap:
-              20,
-          }}
-        >
-
-          <button
-            onClick={() =>
-              navigate(
-                "home"
-              )
-            }
-            style={{
-              padding:
-                "10px 18px",
-              border:
-                "none",
-              borderRadius:
-                6,
-              background:
-                "#475569",
-              color:
-                "white",
-              cursor:
-                "pointer",
-            }}
-          >
+    <div className="page-container">
+      {/* HEADER BAR */}
+      <div className="page-header-bar">
+        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <button onClick={() => navigate("home")} className="btn-secondary">
             ← Back
           </button>
-
           <div>
-
-            <h1
-              style={{
-                margin:
-                  0,
-                fontSize:
-                  30,
-                color:
-                  "#f8fafc",
-              }}
-            >
-              🔍 Investigation
+            <h1 className="page-title">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--accent-cyan)" strokeWidth="2.5">
+                <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+              </svg>
+              Dataset Catalog & Investigation Launcher
             </h1>
-
-            <p
-              style={{
-                marginTop:
-                  5,
-                color:
-                  "#94a3b8",
-              }}
-            >
-              Select a dataset and launch the
-              investigation workspace.
+            <p className="page-subtitle">
+              Select an ingested engineering dataset group to launch interactive multi-dimensional analytics.
             </p>
-
           </div>
-
         </div>
 
         <button
-          disabled={
-            selected === null
-          }
-          onClick={
-            investigateDataset
-          }
-          style={{
-            padding:
-              "12px 24px",
-            border:
-              "none",
-            borderRadius:
-              6,
-            fontSize:
-              15,
-            fontWeight:
-              600,
-            background:
-              selected === null
-                ? "#475569"
-                : "#16a34a",
-            color:
-              "white",
-            cursor:
-              selected === null
-                ? "not-allowed"
-                : "pointer",
-          }}
+          disabled={selected === null}
+          onClick={investigateDataset}
+          className="btn-primary"
+          style={{ padding: "10px 22px", fontSize: 14 }}
         >
-          Investigate Selected
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <circle cx="11" cy="11" r="8"/>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          Investigate Selected Dataset →
         </button>
-
       </div>
 
-      {/* =================================================
-          MAIN
-      ================================================= */}
-
-      <div
-        style={{
-          flex:
-            1,
-          padding:
-            35,
-          overflow:
-            "auto",
-        }}
-      >
-
-        {/* LOADING */}
-
+      {/* MAIN VIEWPORT */}
+      <div className="page-content" style={{ padding: 28, display: "flex", flexDirection: "column", gap: 20 }}>
         {loading && (
-          <div
-            style={{
-              display:
-                "flex",
-              justifyContent:
-                "center",
-              alignItems:
-                "center",
-              height:
-                "60vh",
-              fontSize:
-                20,
-            }}
-          >
-            Loading datasets...
+          <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: "50vh", color: "var(--text-muted)", fontSize: 16 }}>
+            Loading dataset catalog...
           </div>
         )}
 
-        {/* ERROR */}
+        {!loading && error && (
+          <div style={{ backgroundColor: "rgba(239, 68, 68, 0.12)", border: "1px solid rgba(239, 68, 68, 0.3)", color: "var(--status-detect)", padding: "16px 20px", borderRadius: "var(--radius-lg)" }}>
+            ❌ {error}
+          </div>
+        )}
 
-        {!loading &&
-          error && (
-            <div
-              style={{
-                background:
-                  "#7f1d1d",
-                border:
-                  "1px solid #ef4444",
-                color:
-                  "#fecaca",
-                padding:
-                  "14px 18px",
-                borderRadius:
-                  8,
-              }}
-            >
-              ❌ {error}
+        {!loading && !error && datasetGroups.length === 0 && (
+          <div style={{ padding: 40, textAlign: "center", color: "var(--text-muted)", fontSize: 15 }}>
+            No datasets available. Ingest a dataset first.
+          </div>
+        )}
+
+        {!loading && !error && datasetGroups.length > 0 && (
+          <div className="panel-card" style={{ padding: 0, overflow: "hidden" }}>
+            <div style={{ padding: "16px 20px", borderBottom: "1px solid var(--border-subtle)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text-primary)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                Available Dataset Groups ({datasetGroups.length})
+              </div>
+              <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                Click any row to select for investigation
+              </div>
             </div>
-          )}
 
-        {/* EMPTY */}
-
-        {!loading &&
-          !error &&
-          datasetGroups.length ===
-            0 && (
-            <div
-              style={{
-                display:
-                  "flex",
-                justifyContent:
-                  "center",
-                alignItems:
-                  "center",
-                height:
-                  "60vh",
-                color:
-                  "#94a3b8",
-                fontSize:
-                  20,
-              }}
-            >
-              No datasets available.
-            </div>
-          )}
-
-        {/* DATASET TABLE */}
-
-        {!loading &&
-          !error &&
-          datasetGroups.length >
-            0 && (
-
-            <div
-              style={{
-                background:
-                  "#1e293b",
-                borderRadius:
-                  10,
-                overflow:
-                  "hidden",
-                boxShadow:
-                  "0 6px 18px rgba(0,0,0,0.35)",
-              }}
-            >
-
-              <table
-                style={{
-                  width:
-                    "100%",
-                  borderCollapse:
-                    "collapse",
-                }}
-              >
-
+            <div className="table-container" style={{ border: "none", borderRadius: 0 }}>
+              <table className="analytics-table">
                 <thead>
-
-                  <tr
-                    style={{
-                      background:
-                        "#111827",
-                    }}
-                  >
-
-                    <th
-                      style={
-                        headerStyle
-                      }
-                    >
-                      Select
-                    </th>
-
-                    <th
-                      style={
-                        headerStyle
-                      }
-                    >
-                      Dataset Name
-                    </th>
-
-                    <th
-                      style={
-                        headerStyle
-                      }
-                    >
-                      Raw Dataset
-                    </th>
-
-                    <th
-                      style={
-                        headerStyle
-                      }
-                    >
-                      Tagged Dataset
-                    </th>
-
-                    <th
-                      style={
-                        headerStyle
-                      }
-                    >
-                      Uploaded
-                    </th>
-
-                    <th
-                      style={
-                        headerStyle
-                      }
-                    >
-                      Status
-                    </th>
-
+                  <tr>
+                    <th style={{ width: 50, textAlign: "center" }}>Select</th>
+                    <th>Dataset Name</th>
+                    <th>Raw Dataset</th>
+                    <th>Tagged Dataset(s)</th>
+                    <th>Latest Uploaded</th>
+                    <th>Status</th>
                   </tr>
-
                 </thead>
-
                 <tbody>
+                  {datasetGroups.map((group) => {
+                    const isSelected = selected === group.id;
 
-                  {datasetGroups.map(
-                    (
-                      group
-                    ) => {
+                    return (
+                      <tr
+                        key={group.id}
+                        className={isSelected ? "selected" : ""}
+                        onClick={() => toggleDataset(group.id)}
+                        style={{ cursor: "pointer" }}
+                      >
+                        <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="radio"
+                            checked={isSelected}
+                            onChange={() => toggleDataset(group.id)}
+                          />
+                        </td>
 
-                      const isSelected =
-                        selected ===
-                        group.id;
+                        <td>
+                          <div style={{ fontWeight: 600, color: isSelected ? "var(--accent-cyan)" : "var(--text-primary)", fontSize: 14 }}>
+                            {group.datasetName}
+                          </div>
+                          <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted)" }}>
+                            {group.rawDataset ? `Raw ID #${group.rawDataset.id}` : "No Raw Dataset"}
+                            {group.taggedDatasets.length > 0 && ` • ${group.taggedDatasets.length} Tagged dataset(s)`}
+                          </div>
+                        </td>
 
-                      return (
-                        <tr
-                          key={
-                            group.id
-                          }
-                          style={{
-                            background:
-                              isSelected
-                                ? "#233554"
-                                : "transparent",
-                            transition:
-                              "0.2s",
-                          }}
-                        >
-
-                          {/* SELECT */}
-
-                          <td
-                            style={
-                              cellStyle
-                            }
-                          >
-
-                            <input
-                              type="radio"
-                              checked={
-                                isSelected
-                              }
-                              onChange={() =>
-                                toggleDataset(
-                                  group.id
-                                )
-                              }
-                            />
-
-                          </td>
-
-                          {/* DATASET NAME */}
-
-                          <td
-                            style={
-                              cellStyle
-                            }
-                          >
-
-                            <div
-                              style={{
-                                fontWeight:
-                                  600,
-                                color:
-                                  "#f8fafc",
-                              }}
-                            >
-                              {
-                                group.datasetName
-                              }
+                        <td>
+                          {group.rawDataset ? (
+                            <div>
+                              <div style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+                                {group.rawDataset.file_name}
+                              </div>
+                              <span className="badge badge-cyan" style={{ marginTop: 4 }}>
+                                RAW
+                              </span>
                             </div>
+                          ) : (
+                            <span style={{ color: "var(--text-disabled)" }}>—</span>
+                          )}
+                        </td>
 
-                            <div
-                              style={{
-                                marginTop:
-                                  5,
-                                fontSize:
-                                  12,
-                                color:
-                                  "#94a3b8",
-                              }}
-                            >
-                              {group.rawDataset
-                                ? `Raw ID: ${group.rawDataset.id}`
-                                : "No Raw dataset"}
-
-                              {group.taggedDatasets
-                                .length >
-                                0 &&
-                                ` • ${group.taggedDatasets.length} tagged dataset${
-                                  group.taggedDatasets.length >
-                                  1
-                                    ? "s"
-                                    : ""
-                                }`}
-                            </div>
-
-                          </td>
-
-                          {/* RAW DATASET */}
-
-                          <td
-                            style={
-                              cellStyle
-                            }
-                          >
-
-                            {group.rawDataset ? (
-                              <div>
-
-                                <div
-                                  style={{
-                                    color:
-                                      "#e2e8f0",
-                                  }}
-                                >
-                                  {
-                                    group
-                                      .rawDataset
-                                      .file_name
-                                  }
+                        <td>
+                          {group.taggedDatasets.length > 0 ? (
+                            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                              {group.taggedDatasets.map((tagged) => (
+                                <div key={tagged.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                  <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+                                    {tagged.file_name}
+                                  </span>
+                                  <span className="badge badge-gray">TAGGED</span>
                                 </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <span style={{ color: "var(--text-disabled)", fontSize: 12 }}>No tagged dataset linked</span>
+                          )}
+                        </td>
 
-                                <span
-                                  style={{
-                                    display:
-                                      "inline-block",
-                                    marginTop:
-                                      6,
-                                    padding:
-                                      "3px 8px",
-                                    borderRadius:
-                                      10,
-                                    background:
-                                      "#1d4ed8",
-                                    color:
-                                      "#dbeafe",
-                                    fontSize:
-                                      11,
-                                    fontWeight:
-                                      600,
-                                  }}
-                                >
-                                  RAW
-                                </span>
+                        <td style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                          {new Date(group.latestUploadedAt).toLocaleString()}
+                        </td>
 
-                              </div>
-                            ) : (
-                              <span
-                                style={{
-                                  color:
-                                    "#64748b",
-                                }}
-                              >
-                                —
-                              </span>
-                            )}
-
-                          </td>
-
-                          {/* TAGGED DATASET */}
-
-                          <td
-                            style={
-                              cellStyle
-                            }
-                          >
-
-                            {group.taggedDatasets
-                              .length >
-                            0 ? (
-
-                              <div
-                                style={{
-                                  display:
-                                    "flex",
-                                  flexDirection:
-                                    "column",
-                                  gap:
-                                    7,
-                                }}
-                              >
-
-                                {group.taggedDatasets.map(
-                                  (
-                                    tagged
-                                  ) => (
-
-                                    <div
-                                      key={
-                                        tagged.id
-                                      }
-                                      style={{
-                                        display:
-                                          "flex",
-                                        alignItems:
-                                          "center",
-                                        gap:
-                                          8,
-                                      }}
-                                    >
-
-                                      <span
-                                        style={{
-                                          color:
-                                            "#e2e8f0",
-                                        }}
-                                      >
-                                        {
-                                          tagged.file_name
-                                        }
-                                      </span>
-
-                                      <span
-                                        style={{
-                                          padding:
-                                            "3px 8px",
-                                          borderRadius:
-                                            10,
-                                          background:
-                                            "#9333ea",
-                                          color:
-                                            "#f3e8ff",
-                                          fontSize:
-                                            11,
-                                          fontWeight:
-                                            600,
-                                        }}
-                                      >
-                                        TAGGED
-                                      </span>
-
-                                    </div>
-
-                                  )
-                                )}
-
-                              </div>
-
-                            ) : (
-
-                              <span
-                                style={{
-                                  color:
-                                    "#64748b",
-                                }}
-                              >
-                                No tagged dataset
-                              </span>
-
-                            )}
-
-                          </td>
-
-                          {/* UPLOADED */}
-
-                          <td
-                            style={
-                              cellStyle
-                            }
-                          >
-
-                            {new Date(
-                              group.latestUploadedAt
-                            ).toLocaleString()}
-
-                          </td>
-
-                          {/* STATUS */}
-
-                          <td
-                            style={
-                              cellStyle
-                            }
-                          >
-
-                            <span
-                              style={{
-                                background:
-                                  group.status ===
-                                  "Completed"
-                                    ? "#16a34a"
-                                    : "#d97706",
-                                color:
-                                  "white",
-                                padding:
-                                  "4px 10px",
-                                borderRadius:
-                                  12,
-                                fontSize:
-                                  13,
-                              }}
-                            >
-                              {
-                                group.status
-                              }
-                            </span>
-
-                          </td>
-
-                        </tr>
-                      );
-                    }
-                  )}
-
+                        <td>
+                          <span className={`status-badge ${String(group.status).toLowerCase() === "completed" ? "resolved" : "investigate"}`}>
+                            {group.status}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
-
               </table>
-
             </div>
-
-          )}
-
+          </div>
+        )}
       </div>
-
     </div>
   );
 }

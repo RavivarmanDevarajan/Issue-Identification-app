@@ -37,6 +37,19 @@ db.prepare(`
 `).run();
 
 /* =======================================================
+   DATASET VIEW PREFERENCES
+======================================================= */
+
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS dataset_view_preferences (
+    dataset_id INTEGER PRIMARY KEY,
+    field_settings_json TEXT NOT NULL DEFAULT '{}',
+    chart_settings_json TEXT NOT NULL DEFAULT '{}',
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`).run();
+
+/* =======================================================
    DATABASE MIGRATION
 ======================================================= */
 
@@ -66,6 +79,117 @@ if (!hasParentDatasetId) {
     "parent_dataset_id column added successfully"
   );
 }
+
+/*
+  Datasets can be refreshed with a newer file after
+  the schema has been defined once, so the time of the
+  most recent refresh is tracked separately from the
+  original upload time.
+*/
+
+const hasLastRefreshedAt =
+  datasetColumns.some(
+    (column) =>
+      column.name === "last_refreshed_at"
+  );
+
+if (!hasLastRefreshedAt) {
+
+  console.log(
+    "Adding last_refreshed_at column to datasets table..."
+  );
+
+  db.prepare(`
+    ALTER TABLE datasets
+    ADD COLUMN last_refreshed_at DATETIME
+  `).run();
+
+  console.log(
+    "last_refreshed_at column added successfully"
+  );
+}
+
+/* =======================================================
+   DATASET VIEW PREFERENCES API
+======================================================= */
+
+app.get(
+  "/datasets/:id/view-preferences",
+  (req, res) => {
+    try {
+      const datasetId = Number(req.params.id);
+
+      if (!Number.isInteger(datasetId)) {
+        return res.status(400).json({ error: "Invalid dataset id" });
+      }
+
+      const preference = db.prepare(`
+        SELECT field_settings_json, chart_settings_json
+        FROM dataset_view_preferences
+        WHERE dataset_id = ?
+      `).get(datasetId);
+
+      return res.json({
+        fieldSettings: preference
+          ? JSON.parse(preference.field_settings_json)
+          : {},
+        chartSettings: preference
+          ? JSON.parse(preference.chart_settings_json)
+          : {},
+      });
+    } catch (error) {
+      console.error("Load dataset view preferences error:", error);
+      return res.status(500).json({ error: "Failed to load view preferences" });
+    }
+  }
+);
+
+app.put(
+  "/datasets/:id/view-preferences",
+  (req, res) => {
+    try {
+      const datasetId = Number(req.params.id);
+      const { fieldSettings = {}, chartSettings = {} } = req.body || {};
+
+      if (!Number.isInteger(datasetId)) {
+        return res.status(400).json({ error: "Invalid dataset id" });
+      }
+
+      if (
+        !fieldSettings ||
+        typeof fieldSettings !== "object" ||
+        Array.isArray(fieldSettings) ||
+        !chartSettings ||
+        typeof chartSettings !== "object" ||
+        Array.isArray(chartSettings)
+      ) {
+        return res.status(400).json({ error: "Invalid view preferences" });
+      }
+
+      db.prepare(`
+        INSERT INTO dataset_view_preferences (
+          dataset_id,
+          field_settings_json,
+          chart_settings_json,
+          updated_at
+        ) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(dataset_id) DO UPDATE SET
+          field_settings_json = excluded.field_settings_json,
+          chart_settings_json = excluded.chart_settings_json,
+          updated_at = CURRENT_TIMESTAMP
+      `).run(
+        datasetId,
+        JSON.stringify(fieldSettings),
+        JSON.stringify(chartSettings)
+      );
+
+      return res.json({ success: true });
+    } catch (error) {
+      console.error("Save dataset view preferences error:", error);
+      return res.status(500).json({ error: "Failed to save view preferences" });
+    }
+  }
+);
 
 /* =======================================================
    ASGs TABLE
@@ -1171,6 +1295,785 @@ app.post(
 
         message:
           "Failed to upload dataset",
+
+      });
+    }
+  }
+);
+
+/* =======================================================
+   REFRESH HELPERS
+======================================================= */
+
+/*
+  The headers of a dataset.
+
+  Records are stored exactly as they were parsed from
+  the file, so the stored records are the source of
+  truth for the headers. The schema column names are
+  used only when a dataset holds no records yet.
+*/
+
+function getDatasetHeaders(
+  records,
+  schema
+) {
+
+  if (
+    Array.isArray(records) &&
+    records.length > 0 &&
+    records[0] &&
+    typeof records[0] === "object"
+  ) {
+
+    return Object.keys(
+      records[0]
+    );
+  }
+
+  if (Array.isArray(schema)) {
+
+    return schema.map(
+      (column) =>
+        String(column?.name || "")
+    );
+  }
+
+  return [];
+}
+
+/*
+  Compares the headers of an incoming file against the
+  headers already defined for the dataset.
+
+  Order is ignored. Missing and unexpected headers are
+  reported separately so the message can say which
+  side of the comparison is wrong.
+*/
+
+function compareHeaders(
+  existingHeaders,
+  incomingHeaders
+) {
+
+  const existingSet =
+    new Set(existingHeaders);
+
+  const incomingSet =
+    new Set(incomingHeaders);
+
+  const missingColumns =
+    existingHeaders.filter(
+      (header) =>
+        !incomingSet.has(header)
+    );
+
+  const unexpectedColumns =
+    incomingHeaders.filter(
+      (header) =>
+        !existingSet.has(header)
+    );
+
+  return {
+    matches:
+      missingColumns.length === 0 &&
+      unexpectedColumns.length === 0,
+
+    missingColumns,
+
+    unexpectedColumns,
+  };
+}
+
+function buildHeaderMismatchMessage(
+  comparison
+) {
+
+  const messages = [];
+
+  if (
+    comparison.missingColumns.length > 0
+  ) {
+
+    messages.push(
+      `Missing column(s): ${comparison.missingColumns
+        .slice(0, 10)
+        .join(", ")}${
+        comparison.missingColumns.length > 10
+          ? "..."
+          : ""
+      }.`
+    );
+  }
+
+  if (
+    comparison.unexpectedColumns.length > 0
+  ) {
+
+    messages.push(
+      `Unexpected column(s): ${comparison.unexpectedColumns
+        .slice(0, 10)
+        .join(", ")}${
+        comparison.unexpectedColumns.length > 10
+          ? "..."
+          : ""
+      }.`
+    );
+  }
+
+  return `The file headers do not match the dataset schema. ${messages.join(
+    " "
+  )}`;
+}
+
+/* =======================================================
+   REFRESH DATASET
+
+   Adds new events and overwrites existing events of a
+   dataset that already has a schema.
+
+   The schema is defined once, at the original upload.
+   A refresh only requires that the incoming file has
+   the same headers.
+
+   Records are matched on the column mapped to "_id":
+
+     known _id    -> the stored record is replaced
+     unknown _id  -> the record is appended
+
+   Nothing is ever deleted, so Tagged datasets that
+   reference this dataset stay valid.
+
+   Passing validateOnly returns the same counts without
+   writing anything, which lets the UI preview the
+   result before it is committed.
+======================================================= */
+
+app.post(
+  "/datasets/:id/refresh",
+  (req, res) => {
+
+    try {
+
+      const start =
+        Date.now();
+
+      const {
+        id,
+      } = req.params;
+
+      const {
+        fileName,
+        data,
+        validateOnly,
+      } = req.body;
+
+      const isValidateOnly =
+        validateOnly === true;
+
+      /* -------------------------------------------------
+         VALIDATE DATA
+      ------------------------------------------------- */
+
+      if (
+        !Array.isArray(data)
+      ) {
+
+        return res.status(
+          400
+        ).json({
+
+          success: false,
+
+          message:
+            "Data must be an array",
+
+        });
+      }
+
+      if (
+        data.length === 0
+      ) {
+
+        return res.status(
+          400
+        ).json({
+
+          success: false,
+
+          message:
+            "The file contains no records",
+
+        });
+      }
+
+      /* -------------------------------------------------
+         LOAD DATASET
+      ------------------------------------------------- */
+
+      const dataset =
+        db.prepare(`
+          SELECT
+            id,
+            dataset_name,
+            data_type,
+            parent_dataset_id,
+            schema_json,
+            data_json
+          FROM datasets
+          WHERE id = ?
+        `).get(id);
+
+      if (!dataset) {
+
+        return res.status(
+          404
+        ).json({
+
+          success: false,
+
+          message:
+            "Dataset not found",
+
+        });
+      }
+
+      let schema = [];
+      let existingData = [];
+
+      try {
+
+        schema =
+          JSON.parse(
+            dataset.schema_json ||
+            "[]"
+          );
+
+      } catch {
+
+        return res.status(
+          400
+        ).json({
+
+          success: false,
+
+          message:
+            "The dataset contains invalid schema data",
+
+        });
+      }
+
+      try {
+
+        existingData =
+          JSON.parse(
+            dataset.data_json ||
+            "[]"
+          );
+
+      } catch {
+
+        return res.status(
+          400
+        ).json({
+
+          success: false,
+
+          message:
+            "The dataset contains invalid record data",
+
+        });
+      }
+
+      /* -------------------------------------------------
+         HEADERS MUST MATCH
+
+         This is what replaces the schema definition
+         step on every subsequent load.
+      ------------------------------------------------- */
+
+      const existingHeaders =
+        getDatasetHeaders(
+          existingData,
+          schema
+        );
+
+      const incomingHeaders =
+        getDatasetHeaders(
+          data,
+          null
+        );
+
+      const headerComparison =
+        compareHeaders(
+          existingHeaders,
+          incomingHeaders
+        );
+
+      if (
+        !headerComparison.matches
+      ) {
+
+        return res.status(
+          400
+        ).json({
+
+          success: false,
+
+          errorType:
+            "HEADER_MISMATCH",
+
+          message:
+            buildHeaderMismatchMessage(
+              headerComparison
+            ),
+
+          expectedHeaders:
+            existingHeaders,
+
+          receivedHeaders:
+            incomingHeaders,
+
+          missingColumns:
+            headerComparison.missingColumns,
+
+          unexpectedColumns:
+            headerComparison.unexpectedColumns,
+
+        });
+      }
+
+      /* -------------------------------------------------
+         _id COLUMN
+      ------------------------------------------------- */
+
+      const idColumnResult =
+        getIdColumn(
+          schema
+        );
+
+      if (
+        idColumnResult.error
+      ) {
+
+        return res.status(
+          400
+        ).json({
+
+          success: false,
+
+          message:
+            `The dataset schema is invalid: ${idColumnResult.error}`,
+
+        });
+      }
+
+      const idColumn =
+        idColumnResult.column.name;
+
+      /* -------------------------------------------------
+         INCOMING IDs MUST BE PRESENT AND UNIQUE
+      ------------------------------------------------- */
+
+      const idValidation =
+        validateDatasetIds(
+          data,
+          idColumn
+        );
+
+      if (
+        !idValidation.valid
+      ) {
+
+        return res.status(
+          400
+        ).json({
+
+          success: false,
+
+          errorType:
+            "INVALID_ID_VALUES",
+
+          message:
+            buildIdValidationMessage(
+              idColumn,
+              idValidation
+            ),
+
+          idColumn,
+
+          duplicateIds:
+            idValidation.duplicateIds,
+
+          blankRows:
+            idValidation.blankRows,
+
+        });
+      }
+
+      /* -------------------------------------------------
+         TAGGED DATA STILL NEEDS A MATCHING RAW ROW
+
+         A refresh can introduce new Tagged events, and
+         those must reference an event that exists in
+         the parent Raw dataset.
+      ------------------------------------------------- */
+
+      if (
+        String(
+          dataset.data_type || ""
+        ).toLowerCase() === "tagged"
+      ) {
+
+        const parentDataset =
+          db.prepare(`
+            SELECT
+              id,
+              schema_json,
+              data_json
+            FROM datasets
+            WHERE id = ?
+          `).get(
+            dataset.parent_dataset_id
+          );
+
+        if (!parentDataset) {
+
+          return res.status(
+            404
+          ).json({
+
+            success: false,
+
+            message:
+              "Parent Raw dataset not found",
+
+          });
+        }
+
+        let parentSchema = [];
+        let parentData = [];
+
+        try {
+
+          parentSchema =
+            JSON.parse(
+              parentDataset.schema_json ||
+              "[]"
+            );
+
+          parentData =
+            JSON.parse(
+              parentDataset.data_json ||
+              "[]"
+            );
+
+        } catch {
+
+          return res.status(
+            400
+          ).json({
+
+            success: false,
+
+            message:
+              "Parent Raw dataset contains invalid data",
+
+          });
+        }
+
+        const rawIdColumnResult =
+          getIdColumn(
+            parentSchema
+          );
+
+        if (
+          rawIdColumnResult.error
+        ) {
+
+          return res.status(
+            400
+          ).json({
+
+            success: false,
+
+            message:
+              `Parent Raw dataset is invalid: ${rawIdColumnResult.error}`,
+
+          });
+        }
+
+        const rawIdColumn =
+          rawIdColumnResult.column.name;
+
+        const rawIds =
+          new Set(
+            parentData
+              .map(
+                (row) =>
+                  normalizeIdValue(
+                    row?.[rawIdColumn]
+                  )
+              )
+              .filter(
+                (value) =>
+                  value !== null
+              )
+          );
+
+        const missingTaggedIds =
+          Array.from(
+            new Set(
+              data
+                .map(
+                  (row) =>
+                    normalizeIdValue(
+                      row?.[idColumn]
+                    )
+                )
+                .filter(
+                  (value) =>
+                    value !== null &&
+                    !rawIds.has(value)
+                )
+            )
+          );
+
+        if (
+          missingTaggedIds.length > 0
+        ) {
+
+          const displayedIds =
+            missingTaggedIds
+              .slice(0, 20)
+              .join(", ");
+
+          const suffix =
+            missingTaggedIds.length > 20
+              ? "..."
+              : "";
+
+          return res.status(
+            400
+          ).json({
+
+            success: false,
+
+            errorType:
+              "TAGGED_ID_NOT_FOUND_IN_RAW",
+
+            message:
+              `Every Tagged _id must exist in the parent Raw dataset. The following Tagged IDs were not found in Raw: ${displayedIds}${suffix}`,
+
+            rawIdColumn,
+
+            taggedIdColumn:
+              idColumn,
+
+            missingTaggedIds,
+
+          });
+        }
+      }
+
+      /* -------------------------------------------------
+         MERGE
+
+         Existing records keep their position so the
+         dataset order stays stable across refreshes.
+         New records are appended in file order.
+      ------------------------------------------------- */
+
+      const merged =
+        [...existingData];
+
+      const indexById =
+        new Map();
+
+      merged.forEach(
+        (row, index) => {
+
+          const normalizedId =
+            normalizeIdValue(
+              row?.[idColumn]
+            );
+
+          if (
+            normalizedId !== null
+          ) {
+
+            indexById.set(
+              normalizedId,
+              index
+            );
+          }
+        }
+      );
+
+      let added = 0;
+      let updated = 0;
+
+      data.forEach(
+        (row) => {
+
+          const normalizedId =
+            normalizeIdValue(
+              row?.[idColumn]
+            );
+
+          if (
+            normalizedId === null
+          ) {
+            return;
+          }
+
+          const existingIndex =
+            indexById.get(
+              normalizedId
+            );
+
+          if (
+            existingIndex === undefined
+          ) {
+
+            indexById.set(
+              normalizedId,
+              merged.length
+            );
+
+            merged.push(row);
+
+            added += 1;
+
+            return;
+          }
+
+          merged[existingIndex] = row;
+
+          updated += 1;
+        }
+      );
+
+      /* -------------------------------------------------
+         PREVIEW ONLY
+      ------------------------------------------------- */
+
+      if (isValidateOnly) {
+
+        return res.json({
+
+          success: true,
+
+          validateOnly: true,
+
+          datasetId:
+            dataset.id,
+
+          datasetName:
+            dataset.dataset_name,
+
+          ingestionType:
+            dataset.data_type,
+
+          idColumn,
+
+          added,
+
+          updated,
+
+          totalBefore:
+            existingData.length,
+
+          totalAfter:
+            merged.length,
+
+        });
+      }
+
+      /* -------------------------------------------------
+         WRITE
+      ------------------------------------------------- */
+
+      const sizeKB =
+        Buffer.byteLength(
+          JSON.stringify(
+            merged
+          )
+        ) / 1024;
+
+      db.prepare(`
+        UPDATE datasets
+        SET
+          data_json = ?,
+          size_kb = ?,
+          ingestion_time_ms = ?,
+          file_name = COALESCE(?, file_name),
+          status = 'Completed',
+          last_refreshed_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(
+
+        JSON.stringify(
+          merged
+        ),
+
+        sizeKB,
+
+        Date.now() - start,
+
+        fileName || null,
+
+        dataset.id
+
+      );
+
+      res.json({
+
+        success: true,
+
+        validateOnly: false,
+
+        message:
+          `Dataset refreshed. ${added} event(s) added, ${updated} event(s) updated.`,
+
+        datasetId:
+          dataset.id,
+
+        datasetName:
+          dataset.dataset_name,
+
+        ingestionType:
+          dataset.data_type,
+
+        idColumn,
+
+        added,
+
+        updated,
+
+        totalBefore:
+          existingData.length,
+
+        totalAfter:
+          merged.length,
+
+      });
+
+    } catch (error) {
+
+      console.error(
+        "Refresh dataset error:",
+        error
+      );
+
+      res.status(
+        500
+      ).json({
+
+        success: false,
+
+        message:
+          "Failed to refresh dataset",
 
       });
     }

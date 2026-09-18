@@ -25,8 +25,6 @@ interface Props {
   ) => void;
 }
 
-/* ---------------- OPERATORS ---------------- */
-
 const operators = [
   { label: "Equals", value: "equals" },
   { label: "Not Equals", value: "!=" },
@@ -47,195 +45,89 @@ export default function FilterPanel({
   updateFilter,
 }: Props) {
   return (
-    <div
-      style={{
-        padding: 15,
-        borderTop: "1px solid #334155",
-      }}
-    >
+    <div style={{ padding: 16, borderTop: "1px solid var(--border-subtle)" }}>
       {/* Header */}
-
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 15,
-        }}
-      >
-        <h3
-          style={{
-            margin: 0,
-            color: "white",
-            fontSize: 16,
-          }}
-        >
-          Filters
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <h3 style={{ margin: 0, color: "var(--text-primary)", fontSize: 14, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+          Active Filters ({filters.length})
         </h3>
-
-        <button
-          onClick={addFilter}
-          style={{
-            background: "#2563eb",
-            color: "white",
-            border: "none",
-            borderRadius: 6,
-            padding: "6px 12px",
-            cursor: "pointer",
-            fontWeight: 600,
-          }}
-        >
-          + Add
+        <button onClick={addFilter} className="btn-primary" style={{ padding: "4px 10px", fontSize: 12 }}>
+          + Add Filter
         </button>
       </div>
 
       {/* Empty State */}
-
       {filters.length === 0 && (
-        <div
-          style={{
-            color: "#94a3b8",
-            fontSize: 13,
-            textAlign: "center",
-            padding: "15px 0",
-          }}
-        >
-          No filters added.
+        <div style={{ color: "var(--text-muted)", fontSize: 12, textAlign: "center", padding: "16px 0" }}>
+          No custom filters applied.
         </div>
       )}
 
       {/* Filter Cards */}
-
       {filters.map((filter) => (
         <div
           key={filter.id}
           style={{
-            background: "#1e293b",
-            border: "1px solid #334155",
-            borderRadius: 8,
+            backgroundColor: "var(--bg-input)",
+            border: "1px solid var(--border-subtle)",
+            borderRadius: "var(--radius-md)",
             padding: 12,
-            marginBottom: 12,
+            marginBottom: 10,
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
           }}
         >
-          {/* Field */}
-
-          <div style={{ marginBottom: 10 }}>
-            <label
-              style={{
-                fontSize: 12,
-                color: "#cbd5e1",
-              }}
-            >
-              Field
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 600, color: "var(--text-secondary)", display: "block", marginBottom: 4 }}>
+              Target Field
             </label>
-
             <select
               value={filter.field}
-              onChange={(e) =>
-                updateFilter(
-                  filter.id,
-                  "field",
-                  e.target.value
-                )
-              }
-              style={selectStyle}
+              onChange={(e) => updateFilter(filter.id, "field", e.target.value)}
+              style={{ width: "100%" }}
             >
-              <option value="">
-                Select Field
-              </option>
-
+              <option value="">-- Select Field --</option>
               {columns.map((column) => (
-                <option
-                  key={column.name}
-                  value={column.name}
-                >
+                <option key={column.name} value={column.name}>
                   {column.name}
                 </option>
               ))}
             </select>
           </div>
 
-          {/* Operator */}
-
-          <div style={{ marginBottom: 10 }}>
-            <label
-              style={{
-                fontSize: 12,
-                color: "#cbd5e1",
-              }}
-            >
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 600, color: "var(--text-secondary)", display: "block", marginBottom: 4 }}>
               Operator
             </label>
-
             <select
               value={filter.operator}
-              onChange={(e) =>
-                updateFilter(
-                  filter.id,
-                  "operator",
-                  e.target.value
-                )
-              }
-              style={selectStyle}
+              onChange={(e) => updateFilter(filter.id, "operator", e.target.value)}
+              style={{ width: "100%" }}
             >
-              <option value="">
-                Select Operator
-              </option>
-
-              {operators.map((operator) => (
-                <option
-                  key={operator.value}
-                  value={operator.value}
-                >
-                  {operator.label}
+              <option value="">-- Select Operator --</option>
+              {operators.map((op) => (
+                <option key={op.value} value={op.value}>
+                  {op.label}
                 </option>
               ))}
             </select>
           </div>
 
-          {/* Value */}
-
-          <div style={{ marginBottom: 12 }}>
-            <label
-              style={{
-                fontSize: 12,
-                color: "#cbd5e1",
-              }}
-            >
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 600, color: "var(--text-secondary)", display: "block", marginBottom: 4 }}>
               Value
             </label>
-
             <input
               type="text"
               value={filter.value}
-              onChange={(e) =>
-                updateFilter(
-                  filter.id,
-                  "value",
-                  e.target.value
-                )
-              }
-              placeholder="Enter value..."
-              style={inputStyle}
+              onChange={(e) => updateFilter(filter.id, "value", e.target.value)}
+              placeholder="Enter filter value..."
+              style={{ width: "100%" }}
             />
           </div>
 
-          {/* Remove */}
-
-          <button
-            onClick={() =>
-              removeFilter(filter.id)
-            }
-            style={{
-              width: "100%",
-              background: "#dc2626",
-              color: "white",
-              border: "none",
-              borderRadius: 6,
-              padding: "8px",
-              cursor: "pointer",
-            }}
-          >
+          <button onClick={() => removeFilter(filter.id)} className="btn-danger" style={{ marginTop: 4, width: "100%", padding: "6px" }}>
             Remove Filter
           </button>
         </div>
@@ -243,24 +135,3 @@ export default function FilterPanel({
     </div>
   );
 }
-
-const selectStyle: React.CSSProperties = {
-  width: "100%",
-  marginTop: 5,
-  padding: "8px",
-  borderRadius: 6,
-  border: "1px solid #475569",
-  background: "#0f172a",
-  color: "white",
-};
-
-const inputStyle: React.CSSProperties = {
-  width: "100%",
-  marginTop: 5,
-  padding: "8px",
-  borderRadius: 6,
-  border: "1px solid #475569",
-  background: "#0f172a",
-  color: "white",
-  boxSizing: "border-box",
-};

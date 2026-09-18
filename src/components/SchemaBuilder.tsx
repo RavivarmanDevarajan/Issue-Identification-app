@@ -43,6 +43,15 @@ export default function SchemaBuilder({
   ingestionType,
   parentDatasetId,
   back,
+  refreshDatasetId,
+  refreshDatasetMeta,
+
+  /*
+    Called once the dataset has been stored, so the
+    ingestion flow can return to the main window
+    instead of leaving the user on the schema screen.
+  */
+  onUploaded,
 }: any) {
 
   /* ====================================================
@@ -104,6 +113,31 @@ export default function SchemaBuilder({
     taggedIdError,
     setTaggedIdError,
   ] = useState("");
+
+  const [
+    loadingRefreshSchema,
+    setLoadingRefreshSchema,
+  ] = useState(false);
+
+  const [
+    refreshSchemaError,
+    setRefreshSchemaError,
+  ] = useState("");
+
+  const [
+    refreshPreviewResult,
+    setRefreshPreviewResult,
+  ] = useState<any>(null);
+
+  const [
+    refreshingDataset,
+    setRefreshingDataset,
+  ] = useState(false);
+
+  const [
+    refreshError,
+    setRefreshError,
+  ] = useState<any>(null);
 
   /* ====================================================
      FLEXIBLE DATE VALIDATION
@@ -386,6 +420,89 @@ export default function SchemaBuilder({
   }, [
     initialData,
   ]);
+
+  /* ====================================================
+     LOAD EXISTING SCHEMA (REFRESH MODE)
+  ==================================================== */
+
+  useEffect(() => {
+
+    if (!refreshDatasetId) {
+      return;
+    }
+
+    loadExistingSchema();
+
+  }, [
+    refreshDatasetId,
+  ]);
+
+  async function loadExistingSchema() {
+
+    try {
+
+      setLoadingRefreshSchema(true);
+      setRefreshSchemaError("");
+
+      const response = await fetch(
+        `http://localhost:5000/datasets/${refreshDatasetId}/schema`
+      );
+
+      if (!response.ok) {
+        const txt = await response.text();
+        throw new Error(txt || "Failed to load dataset schema");
+      }
+
+      const result = await response.json();
+
+      const existingCols: Column[] = (result.columns || []).map(
+        (sc: any) => ({
+
+          name: sc.name || sc.column_name,
+
+          type: (sc.type || sc.column_type || "string") as ColumnType,
+
+          ontologyMapping: (sc.ontologyMapping || sc.ontology_mapping || "") as OntologyType,
+
+          error: "",
+
+          include:
+            sc.include === undefined || sc.include === null
+              ? true
+              : !!sc.include,
+
+          sample:
+            initialData && initialData.length > 0
+              ? initialData
+                  .slice(0, 3)
+                  .map((row: any) => row[sc.name || sc.column_name])
+                  .join(", ")
+              : "",
+
+        })
+      );
+
+      if (existingCols.length > 0) {
+        setColumns(existingCols);
+        runPreviewRefresh(existingCols);
+      }
+
+      setRefreshError(null);
+
+    } catch (err: any) {
+
+      console.error("Load existing schema failed:", err);
+      setRefreshSchemaError(
+        err.message || "Could not load the existing schema for this dataset."
+      );
+
+    } finally {
+
+      setLoadingRefreshSchema(false);
+
+    }
+
+  }
 
   /* ====================================================
      LOAD PARENT RAW DATASET
@@ -1504,6 +1621,54 @@ export default function SchemaBuilder({
         );
 
       /*
+        Every column that is part of the schema
+        must be mapped to the ontology.
+
+        An unmapped column cannot be interpreted
+        downstream, so it is rejected here rather
+        than being stored without meaning.
+      */
+
+      const unmapped =
+        includedCols
+          .filter(
+            (
+              column
+            ) =>
+              !column.ontologyMapping
+          )
+          .map(
+            (
+              column
+            ) =>
+              column.name
+          );
+
+      if (
+        unmapped.length > 0
+      ) {
+
+        const shown =
+          unmapped
+            .slice(0, 5)
+            .join(", ");
+
+        const remaining =
+          unmapped.length - 5;
+
+        return (
+          `Every column needs an ontology mapping. ${
+            unmapped.length
+          } still unmapped: ${shown}${
+            remaining > 0
+              ? ` and ${remaining} more`
+              : ""
+          }.`
+        );
+
+      }
+
+      /*
         Exactly one _id is required
         for both Raw and Tagged.
       */
@@ -1695,11 +1860,186 @@ export default function SchemaBuilder({
   };
 
   /* ====================================================
+     REFRESH DATASET HELPERS
+  ==================================================== */
+
+  const runPreviewRefresh =
+    async (colsOverride?: Column[]) => {
+
+      try {
+
+        setRefreshingDataset(true);
+        setRefreshError(null);
+        setRefreshPreviewResult(null);
+
+        const targetCols = colsOverride || columns;
+
+        const schema =
+          targetCols
+            .filter((c) => c.include)
+            .map((column) => ({
+              name: column.name,
+              type: column.type,
+              ontologyMapping: column.ontologyMapping,
+            }));
+
+        const payload: any = {
+          fileName,
+          schema,
+          data: initialData,
+          validateOnly: true,
+        };
+
+        const response = await fetch(
+          `http://localhost:5000/datasets/${refreshDatasetId}/refresh`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          }
+        );
+
+        const body = await response.json().catch(async () => ({
+          message: await response.text(),
+        }));
+
+        if (!response.ok) {
+
+          if (body && body.errorType === "HEADER_MISMATCH") {
+            setRefreshError({
+              type: "HEADER_MISMATCH",
+              expectedHeaders: body.expectedHeaders,
+              receivedHeaders: body.receivedHeaders,
+              missingColumns: body.missingColumns,
+              unexpectedColumns: body.unexpectedColumns,
+              message: body.message,
+            });
+          } else {
+            setRefreshError({
+              type: "GENERAL",
+              message: body.message || "Refresh preview failed",
+            });
+          }
+
+          return;
+        }
+
+        setRefreshPreviewResult(body);
+
+      } catch (err: any) {
+
+        console.error("Refresh preview failed:", err);
+        setRefreshError({
+          type: "GENERAL",
+          message: err.message || "Network error during refresh preview.",
+        });
+
+      } finally {
+
+        setRefreshingDataset(false);
+
+      }
+
+    };
+
+  const handlePreviewRefresh = () => runPreviewRefresh();
+
+  const handleConfirmRefresh =
+    async () => {
+
+      try {
+
+        setRefreshingDataset(true);
+        setRefreshError(null);
+
+        const schema =
+          columns
+            .filter((c) => c.include)
+            .map((column) => ({
+              name: column.name,
+              type: column.type,
+              ontologyMapping: column.ontologyMapping,
+            }));
+
+        const payload: any = {
+          fileName,
+          schema,
+          data: initialData,
+        };
+
+        const response = await fetch(
+          `http://localhost:5000/datasets/${refreshDatasetId}/refresh`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          }
+        );
+
+        const body = await response.json().catch(async () => ({
+          message: await response.text(),
+        }));
+
+        if (!response.ok) {
+
+          if (body && body.errorType === "HEADER_MISMATCH") {
+            setRefreshError({
+              type: "HEADER_MISMATCH",
+              expectedHeaders: body.expectedHeaders,
+              receivedHeaders: body.receivedHeaders,
+              missingColumns: body.missingColumns,
+              unexpectedColumns: body.unexpectedColumns,
+              message: body.message,
+            });
+          } else {
+            setRefreshError({
+              type: "GENERAL",
+              message: body.message || "Dataset refresh failed",
+            });
+          }
+
+          return;
+        }
+
+        const countsMsg = body.added !== undefined
+          ? ` ${body.added} added, ${body.updated ?? 0} updated.`
+          : "";
+
+        alert(
+          `✅ Dataset refreshed successfully!${countsMsg}`
+        );
+
+        if (onUploaded) {
+          onUploaded();
+        }
+
+      } catch (err: any) {
+
+        console.error("Refresh failed:", err);
+        setRefreshError({
+          type: "GENERAL",
+          message: err.message || "Network error during dataset refresh.",
+        });
+
+      } finally {
+
+        setRefreshingDataset(false);
+
+      }
+
+    };
+
+  /* ====================================================
      UPLOAD DATASET
   ==================================================== */
 
   const handleUpload =
     async () => {
+
+      if (refreshDatasetId) {
+        handleConfirmRefresh();
+        return;
+      }
 
       if (
         hasErrors ||
@@ -1842,6 +2182,17 @@ export default function SchemaBuilder({
             : "✅ Raw dataset uploaded successfully!"
         );
 
+        /*
+          The dataset is stored, so the ingestion flow
+          is finished and returns to the main window.
+        */
+
+        if (onUploaded) {
+
+          onUploaded();
+
+        }
+
       } catch (
         error
       ) {
@@ -1963,6 +2314,296 @@ export default function SchemaBuilder({
         </strong>
 
       </div>
+
+      {/* ==================================================
+          REFRESH MODE BANNERS
+      ================================================== */}
+
+      {refreshDatasetId && (
+
+        <>
+
+          {loadingRefreshSchema ? (
+
+            <div
+              style={{
+                marginBottom: "18px",
+                padding: "14px 18px",
+                background: "#0c4a6e",
+                border: "1px solid #0369a1",
+                borderRadius: 8,
+                color: "#bae6fd",
+                fontSize: 13,
+              }}
+            >
+              Loading existing dataset schema...
+            </div>
+
+          ) : refreshSchemaError ? (
+
+            <div
+              style={{
+                marginBottom: "18px",
+                padding: "14px 18px",
+                background: "#450a0a",
+                border: "1px solid #7f1d1d",
+                borderRadius: 8,
+                color: "#fca5a5",
+                fontSize: 13,
+              }}
+            >
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>
+                ⚠ Schema Load Failed
+              </div>
+              <div>{refreshSchemaError}</div>
+            </div>
+
+          ) : (
+
+            <div
+              style={{
+                marginBottom: "18px",
+                padding: "14px 18px",
+                background: "#78350f",
+                border: "1px solid #b45309",
+                borderRadius: 8,
+              }}
+            >
+
+              <div
+                style={{
+                  fontSize: 14,
+                  fontWeight: 700,
+                  color: "#fcd34d",
+                  marginBottom: 6,
+                }}
+              >
+                🔄 Refresh Mode — Schema Locked
+              </div>
+
+              <div
+                style={{
+                  fontSize: 12.5,
+                  color: "#fde68a",
+                  lineHeight: 1.5,
+                }}
+              >
+                The column types and ontology mappings below are reused from the
+                original dataset upload and are not editable. Records with a
+                matching <strong>_id</strong> will be overwritten; new records
+                will be appended. No existing records are deleted.
+              </div>
+
+            </div>
+
+          )}
+
+          {refreshError && (
+
+            <div
+              style={{
+                marginBottom: "18px",
+                padding: "14px 18px",
+                background: "#450a0a",
+                border: "1px solid #b91c1c",
+                borderRadius: 8,
+              }}
+            >
+
+              <div
+                style={{
+                  fontSize: 13.5,
+                  fontWeight: 700,
+                  color: "#fecaca",
+                  marginBottom: 8,
+                }}
+              >
+                {refreshError.type === "HEADER_MISMATCH"
+                  ? "❌ CSV Headers Do Not Match The Original Dataset"
+                  : "❌ Refresh Error"}
+              </div>
+
+              {refreshError.type === "HEADER_MISMATCH" ? (
+
+                <div
+                  style={{
+                    fontSize: 12.5,
+                    color: "#fecaca",
+                    lineHeight: 1.6,
+                  }}
+                >
+
+                  <div style={{ marginTop: 6 }}>
+                    {refreshError.message}
+                  </div>
+
+                  {refreshError.missingColumns &&
+                    refreshError.missingColumns.length > 0 && (
+                      <div style={{ marginTop: 8 }}>
+                        <div style={{ fontWeight: 600, color: "#f87171" }}>
+                          Missing columns (required):
+                        </div>
+                        <div
+                          style={{
+                            marginTop: 3,
+                            padding: "6px 8px",
+                            background: "#1c1917",
+                            border: "1px solid #57534e",
+                            borderRadius: 4,
+                            fontFamily: "monospace",
+                            fontSize: 12,
+                          }}
+                        >
+                          {refreshError.missingColumns.join(", ")}
+                        </div>
+                      </div>
+                    )}
+
+                  {refreshError.unexpectedColumns &&
+                    refreshError.unexpectedColumns.length > 0 && (
+                      <div style={{ marginTop: 8 }}>
+                        <div style={{ fontWeight: 600, color: "#f87171" }}>
+                          Unexpected columns (not in original):
+                        </div>
+                        <div
+                          style={{
+                            marginTop: 3,
+                            padding: "6px 8px",
+                            background: "#1c1917",
+                            border: "1px solid #57534e",
+                            borderRadius: 4,
+                            fontFamily: "monospace",
+                            fontSize: 12,
+                          }}
+                        >
+                          {refreshError.unexpectedColumns.join(", ")}
+                        </div>
+                      </div>
+                    )}
+
+                </div>
+
+              ) : (
+
+                <div
+                  style={{
+                    fontSize: 12.5,
+                    color: "#fecaca",
+                    lineHeight: 1.5,
+                  }}
+                >
+                  {refreshError.message}
+                </div>
+
+              )}
+
+            </div>
+
+          )}
+
+          {refreshPreviewResult && (
+
+            <div
+              style={{
+                marginBottom: "18px",
+                padding: "14px 18px",
+                background: "#052e16",
+                border: "1px solid #15803d",
+                borderRadius: 8,
+              }}
+            >
+
+              <div
+                style={{
+                  fontSize: 14,
+                  fontWeight: 700,
+                  color: "#86efac",
+                  marginBottom: 8,
+                }}
+              >
+                ✓ Refresh Preview
+              </div>
+
+              <div
+                style={{
+                  fontSize: 13,
+                  color: "#bbf7d0",
+                  lineHeight: 1.6,
+                }}
+              >
+
+                <div>
+                  Records to be <strong style={{ color: "#4ade80" }}>added</strong>:{" "}
+                  <strong style={{ color: "#4ade80" }}>
+                    {refreshPreviewResult.added ?? 0}
+                  </strong>
+                </div>
+
+                <div style={{ marginTop: 3 }}>
+                  Records to be <strong style={{ color: "#fbbf24" }}>updated</strong>{" "}
+                  (matched _id, will overwrite):{" "}
+                  <strong style={{ color: "#fbbf24" }}>
+                    {refreshPreviewResult.updated ?? 0}
+                  </strong>
+                </div>
+
+                <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px dashed #15803d" }}>
+                  Total records before:{" "}
+                  <strong>{refreshPreviewResult.totalBefore ?? "—"}</strong>
+                  {" → "}
+                  after refresh:{" "}
+                  <strong style={{ color: "#4ade80" }}>
+                    {refreshPreviewResult.totalAfter ?? "—"}
+                  </strong>
+                </div>
+
+                {(refreshPreviewResult.taggedOrphanCount ?? 0) > 0 && (
+                  <div
+                    style={{
+                      marginTop: 8,
+                      padding: "8px 10px",
+                      background: "#422006",
+                      border: "1px solid #a16207",
+                      borderRadius: 5,
+                      color: "#fde68a",
+                      fontSize: 12,
+                    }}
+                  >
+                    ⚠ {refreshPreviewResult.taggedOrphanCount} Tagged record(s) have _id
+                    values not present in the parent Raw dataset. These will be
+                    rejected by the backend when you confirm.
+                  </div>
+                )}
+
+                <div style={{ marginTop: 8, fontSize: 12, color: "#86efac" }}>
+                  {refreshPreviewResult.message}
+                </div>
+
+                <div
+                  style={{
+                    marginTop: 10,
+                    padding: "8px 10px",
+                    background: "#064e3b",
+                    borderRadius: 5,
+                    fontSize: 12,
+                    color: "#a7f3d0",
+                    lineHeight: 1.5,
+                  }}
+                >
+                  Click <strong>"Confirm Refresh"</strong> below to apply these
+                  changes. This is the last step before the dataset is
+                  updated.
+                </div>
+
+              </div>
+
+            </div>
+
+          )}
+
+        </>
+
+      )}
 
       {/* ==================================================
           TAGGED DATA PARENT INFORMATION
@@ -2349,6 +2990,10 @@ export default function SchemaBuilder({
                       column.include
                     }
 
+                    disabled={
+                      !!refreshDatasetId
+                    }
+
                     onChange={() =>
                       toggleInclude(
                         index
@@ -2358,6 +3003,14 @@ export default function SchemaBuilder({
                     style={{
                       transform:
                         "scale(1.2)",
+                      cursor:
+                        refreshDatasetId
+                          ? "not-allowed"
+                          : "pointer",
+                      opacity:
+                        refreshDatasetId
+                          ? 0.8
+                          : 1,
                     }}
                   />
 
@@ -2378,6 +3031,10 @@ export default function SchemaBuilder({
                   <select
                     value={
                       column.type
+                    }
+
+                    disabled={
+                      !!refreshDatasetId
                     }
 
                     onChange={(
@@ -2402,6 +3059,16 @@ export default function SchemaBuilder({
 
                       padding:
                         "5px",
+
+                      cursor:
+                        refreshDatasetId
+                          ? "not-allowed"
+                          : "pointer",
+
+                      opacity:
+                        refreshDatasetId
+                          ? 0.85
+                          : 1,
                     }}
                   >
 
@@ -2450,6 +3117,10 @@ export default function SchemaBuilder({
                       column.ontologyMapping
                     }
 
+                    disabled={
+                      !!refreshDatasetId
+                    }
+
                     onChange={(
                       event
                     ) =>
@@ -2467,11 +3138,30 @@ export default function SchemaBuilder({
                       color:
                         "white",
 
+                      /*
+                        An included column without a
+                        mapping is highlighted so it can
+                        be found in a long table.
+                      */
                       border:
-                        "1px solid #334155",
+                        !refreshDatasetId &&
+                        column.include &&
+                        !column.ontologyMapping
+                          ? "1px solid #ef4444"
+                          : "1px solid #334155",
 
                       padding:
                         "5px",
+
+                      cursor:
+                        refreshDatasetId
+                          ? "not-allowed"
+                          : "pointer",
+
+                      opacity:
+                        refreshDatasetId
+                          ? 0.85
+                          : 1,
                     }}
                   >
 
@@ -2554,152 +3244,62 @@ export default function SchemaBuilder({
 
       <div
         style={{
-          display:
-            "flex",
-
-          gap:
-            "12px",
-
-          marginTop:
-            "20px",
+          display: "flex",
+          gap: 12,
+          marginTop: 24,
+          justifyContent: "flex-end",
         }}
       >
-
         {/* BACK */}
-
         {back && (
-
           <button
-            onClick={
-              back
-            }
-
-            disabled={
-              uploading
-            }
-
-            style={{
-              padding:
-                "10px 20px",
-
-              backgroundColor:
-                "#475569",
-
-              color:
-                "white",
-
-              border:
-                "none",
-
-              borderRadius:
-                "5px",
-
-              cursor:
-                uploading
-                  ? "not-allowed"
-                  : "pointer",
-            }}
+            onClick={back}
+            disabled={uploading}
+            className="btn-secondary"
           >
             ← Back
           </button>
-
         )}
 
         {/* SAVE SCHEMA */}
+        {!refreshDatasetId && (
+          <button
+            onClick={handleSave}
+            disabled={
+              hasErrors ||
+              !!ontologyErrorMessage ||
+              !!validationError
+            }
+            className="btn-secondary"
+            style={{
+              borderColor: "var(--border-cyan)",
+              color: "var(--accent-cyan)",
+            }}
+          >
+            Save Schema Configuration
+          </button>
+        )}
 
+        {/* UPLOAD / REFRESH DATASET */}
         <button
-          onClick={
-            handleSave
-          }
-
+          onClick={handleUpload}
           disabled={
-            hasErrors ||
-            !!ontologyErrorMessage ||
-            !!validationError
+            uploading ||
+            refreshingDataset ||
+            (!refreshDatasetId && (hasErrors || !!ontologyErrorMessage || !!validationError)) ||
+            (!!refreshDatasetId && !!refreshError && refreshError.type === "HEADER_MISMATCH")
           }
-
+          className="btn-primary"
           style={{
-            padding:
-              "10px 20px",
-
-            backgroundColor:
-              hasErrors ||
-              ontologyErrorMessage ||
-              validationError
-                ? "#64748b"
-                : "#2563eb",
-
-            color:
-              "white",
-
-            border:
-              "none",
-
-            borderRadius:
-              "5px",
-
-            cursor:
-              hasErrors ||
-              ontologyErrorMessage ||
-              validationError
-                ? "not-allowed"
-                : "pointer",
+            backgroundColor: refreshDatasetId ? "var(--status-investigate)" : undefined,
           }}
         >
-          Save Schema
+          {uploading || refreshingDataset
+            ? "Syncing Dataset..."
+            : refreshDatasetId
+            ? "🔄 Refresh & Sync Dataset"
+            : "Upload & Complete Ingestion →"}
         </button>
-
-        {/* UPLOAD DATASET */}
-
-        <button
-          onClick={
-            handleUpload
-          }
-
-          disabled={
-            hasErrors ||
-            !!ontologyErrorMessage ||
-            !!validationError ||
-            uploading
-          }
-
-          style={{
-            padding:
-              "10px 20px",
-
-            backgroundColor:
-              hasErrors ||
-              ontologyErrorMessage ||
-              validationError ||
-              uploading
-                ? "#64748b"
-                : "#16a34a",
-
-            color:
-              "white",
-
-            border:
-              "none",
-
-            borderRadius:
-              "5px",
-
-            cursor:
-              hasErrors ||
-              ontologyErrorMessage ||
-              validationError ||
-              uploading
-                ? "not-allowed"
-                : "pointer",
-          }}
-        >
-
-          {uploading
-            ? "Uploading..."
-            : "Upload Dataset"}
-
-        </button>
-
       </div>
 
     </div>

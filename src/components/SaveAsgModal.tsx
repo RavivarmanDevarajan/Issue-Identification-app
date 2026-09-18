@@ -8,6 +8,20 @@ import type {
   FieldFilter,
 } from "./filterTypes";
 
+import type {
+  ASGTrend,
+  CountermeasureAction,
+} from "../App";
+
+import { CountermeasureFields } from "./Countermeasure";
+
+import {
+  emptyCountermeasureDraft,
+  fromCountermeasureDraft,
+  isCountermeasureDraftPartial,
+  type CountermeasureDraft,
+} from "./countermeasureHelpers";
+
 export const ASG_CATEGORIES = [
   "Recurring",
   "Re-occurring",
@@ -25,10 +39,12 @@ interface Props {
   filters: FieldFilter[];
   saving: boolean;
   errorMessage: string;
+  duplicateASG?: ASGTrend | null;
   onClose: () => void;
   onSave: (
     title: string,
-    category: string
+    category: string,
+    countermeasure?: CountermeasureAction
   ) => void;
 }
 
@@ -43,7 +59,6 @@ function summarizeFilter(
     if (filter.operator === "between") {
       return `${filter.field}: ${filter.min} – ${filter.max}`;
     }
-
     return `${filter.field} ${filter.operator ?? ""} ${filter.value ?? ""}`;
   }
 
@@ -61,6 +76,7 @@ export default function SaveAsgModal({
   filters,
   saving,
   errorMessage,
+  duplicateASG,
   onClose,
   onSave,
 }: Props) {
@@ -69,10 +85,16 @@ export default function SaveAsgModal({
     ASG_CATEGORIES[0]
   );
 
+  const [countermeasure, setCountermeasure] =
+    useState<CountermeasureDraft>(
+      emptyCountermeasureDraft
+    );
+
   useEffect(() => {
     if (open) {
       setTitle("");
       setCategory(ASG_CATEGORIES[0]);
+      setCountermeasure(emptyCountermeasureDraft);
     }
   }, [open]);
 
@@ -80,6 +102,17 @@ export default function SaveAsgModal({
     () => filters.map(summarizeFilter),
     [filters]
   );
+
+  const hasPartialCountermeasure =
+    isCountermeasureDraftPartial(countermeasure);
+
+  const isDuplicate = Boolean(duplicateASG);
+
+  const cannotSave =
+    saving ||
+    !title.trim() ||
+    hasPartialCountermeasure ||
+    isDuplicate;
 
   if (!open) {
     return null;
@@ -90,179 +123,125 @@ export default function SaveAsgModal({
       style={{
         position: "fixed",
         inset: 0,
-        background: "rgba(2, 6, 23, 0.72)",
+        background: "rgba(0, 0, 0, 0.75)",
+        backdropFilter: "blur(4px)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        zIndex: 50,
+        zIndex: 100,
         padding: 24,
       }}
       onClick={onClose}
     >
       <div
+        className="panel-card"
         style={{
           width: "100%",
-          maxWidth: 560,
-          background: "#111827",
-          border: "1px solid #334155",
-          borderRadius: 12,
-          padding: 28,
-          boxShadow: "0 18px 40px rgba(0,0,0,0.45)",
+          maxWidth: 580,
+          maxHeight: "calc(100vh - 48px)",
+          backgroundColor: "var(--bg-modal)",
+          display: "flex",
+          flexDirection: "column",
+          padding: 0,
+          boxShadow: "var(--shadow-lg)",
         }}
         onClick={(event) => event.stopPropagation()}
       >
-        <h2
-          style={{
-            margin: 0,
-            color: "#f8fafc",
-            fontSize: 22,
-          }}
-        >
-          Save ASG
-        </h2>
-
-        <p
-          style={{
-            marginTop: 8,
-            color: "#94a3b8",
-            fontSize: 14,
-          }}
-        >
-          Flag this investigation trend with a title and
-          issue category. It will appear in the ASGs module
-          as C-01, C-02, and so on.
-        </p>
-
-        <label style={labelStyle}>Title</label>
-        <input
-          value={title}
-          onChange={(event) => setTitle(event.target.value)}
-          placeholder="e.g. Handle failures in Q3"
-          style={inputStyle}
-        />
-
-        <label style={labelStyle}>Issue category</label>
-        <select
-          value={category}
-          onChange={(event) => setCategory(event.target.value)}
-          style={inputStyle}
-        >
-          {ASG_CATEGORIES.map((item) => (
-            <option key={item} value={item}>
-              {item}
-            </option>
-          ))}
-        </select>
-
-        <div
-          style={{
-            marginTop: 18,
-            padding: 14,
-            background: "#0f172a",
-            borderRadius: 8,
-            border: "1px solid #334155",
-            fontSize: 13,
-            color: "#cbd5e1",
-          }}
-        >
+        <div style={{ padding: "20px 24px 16px", borderBottom: "1px solid var(--border-subtle)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div>
-            Dataset:{" "}
-            <strong>{datasetName || "Unknown"}</strong>
+            <h2 style={{ margin: 0, color: "var(--text-primary)", fontSize: 18, fontWeight: 600 }}>
+              Flag & Save ASG (Actionable System Group)
+            </h2>
+            <p style={{ marginTop: 4, color: "var(--text-muted)", fontSize: 12 }}>
+              Save current investigation filter state into a tracked ASG issue.
+            </p>
           </div>
-          <div style={{ marginTop: 6 }}>
-            Events: <strong>{eventCount}</strong>
+          <button onClick={onClose} className="btn-ghost" style={{ padding: 4 }}>
+            ✕
+          </button>
+        </div>
+
+        <div style={{ padding: 24, overflowY: "auto", flex: 1, minHeight: 0, display: "flex", flexDirection: "column", gap: 16 }}>
+          {duplicateASG && (
+            <div style={{ padding: "12px 14px", background: "rgba(239, 68, 68, 0.12)", border: "1px solid rgba(239, 68, 68, 0.3)", borderRadius: "var(--radius-md)" }}>
+              <div style={{ color: "var(--status-detect)", fontWeight: 600, fontSize: 13 }}>
+                ⚠️ Issue Duplicate Detected
+              </div>
+              <div style={{ color: "var(--text-primary)", fontSize: 13, marginTop: 4 }}>
+                {duplicateASG.number} — {duplicateASG.title}
+              </div>
+              <div style={{ color: "var(--text-muted)", fontSize: 12, marginTop: 4 }}>
+                An ASG with the exact same dataset and active filters is already registered.
+              </div>
+            </div>
+          )}
+
+          <div>
+            <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "var(--text-primary)", marginBottom: 6 }}>
+              ASG Title *
+            </label>
+            <input
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="e.g. Flight Telemetry Vibration Spike in Motor B"
+              style={{ width: "100%" }}
+            />
           </div>
-          <div style={{ marginTop: 6 }}>
-            Filters:{" "}
-            {filterSummary.length === 0
-              ? "None (full dataset)"
-              : filterSummary.join(" • ")}
+
+          <div>
+            <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "var(--text-primary)", marginBottom: 6 }}>
+              Issue Classification Category *
+            </label>
+            <select value={category} onChange={(e) => setCategory(e.target.value)} style={{ width: "100%" }}>
+              {ASG_CATEGORIES.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div style={{ paddingTop: 14, borderTop: "1px solid var(--border-subtle)" }}>
+            <div style={{ color: "var(--text-primary)", fontWeight: 600, fontSize: 13 }}>
+              Countermeasure Action Plan <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(Optional)</span>
+            </div>
+            <p style={{ color: "var(--text-muted)", fontSize: 12, margin: "4px 0 10px" }}>
+              Plots a countermeasure reference marker on timeline charts for effectiveness tracking.
+            </p>
+
+            <CountermeasureFields draft={countermeasure} onChange={setCountermeasure} disabled={saving} />
+          </div>
+
+          <div style={{ padding: 14, backgroundColor: "var(--bg-input)", borderRadius: "var(--radius-md)", border: "1px solid var(--border-subtle)", fontSize: 12, color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: 4 }}>
+            <div>Dataset: <strong style={{ color: "var(--text-primary)" }}>{datasetName || "Unknown"}</strong></div>
+            <div>Current Events Match: <strong style={{ color: "var(--accent-cyan)" }}>{eventCount}</strong></div>
+            <div>
+              Active Filters:{" "}
+              {filterSummary.length === 0 ? "None (full dataset)" : filterSummary.join(" • ")}
+            </div>
           </div>
         </div>
 
-        {errorMessage && (
-          <div
-            style={{
-              marginTop: 14,
-              color: "#fca5a5",
-              fontSize: 13,
-            }}
-          >
-            {errorMessage}
+        <div style={{ padding: "16px 24px", borderTop: "1px solid var(--border-subtle)", backgroundColor: "var(--bg-sidebar)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          {errorMessage ? (
+            <div style={{ color: "var(--status-detect)", fontSize: 12 }}>{errorMessage}</div>
+          ) : <div />}
+
+          <div style={{ display: "flex", gap: 10 }}>
+            <button onClick={onClose} disabled={saving} className="btn-secondary">
+              Cancel
+            </button>
+            <button
+              onClick={() => onSave(title, category, fromCountermeasureDraft(countermeasure))}
+              disabled={cannotSave}
+              className="btn-primary"
+            >
+              {saving ? "Saving..." : isDuplicate ? "Already Tracked" : "Save & Register ASG"}
+            </button>
           </div>
-        )}
-
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "flex-end",
-            gap: 10,
-            marginTop: 22,
-          }}
-        >
-          <button
-            onClick={onClose}
-            disabled={saving}
-            style={secondaryButton}
-          >
-            Cancel
-          </button>
-
-          <button
-            onClick={() => onSave(title, category)}
-            disabled={saving || !title.trim()}
-            style={{
-              ...primaryButton,
-              opacity: saving || !title.trim() ? 0.6 : 1,
-              cursor:
-                saving || !title.trim()
-                  ? "not-allowed"
-                  : "pointer",
-            }}
-          >
-            {saving ? "Saving..." : "Save ASG"}
-          </button>
         </div>
       </div>
     </div>
   );
 }
-
-const labelStyle: React.CSSProperties = {
-  display: "block",
-  marginTop: 16,
-  marginBottom: 7,
-  fontSize: 12,
-  fontWeight: 600,
-  color: "#cbd5e1",
-};
-
-const inputStyle: React.CSSProperties = {
-  width: "100%",
-  background: "#0f172a",
-  color: "white",
-  border: "1px solid #475569",
-  borderRadius: 6,
-  padding: "10px 12px",
-  outline: "none",
-  boxSizing: "border-box",
-};
-
-const primaryButton: React.CSSProperties = {
-  background: "#16a34a",
-  color: "white",
-  border: "none",
-  padding: "10px 18px",
-  borderRadius: 6,
-  fontWeight: 600,
-};
-
-const secondaryButton: React.CSSProperties = {
-  background: "#374151",
-  color: "white",
-  border: "none",
-  padding: "10px 18px",
-  borderRadius: 6,
-  cursor: "pointer",
-  fontWeight: 600,
-};

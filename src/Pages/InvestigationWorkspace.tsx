@@ -5,20 +5,29 @@ import React, {
 } from "react";
 
 import InvestigationToolbar from "../components/InvestigationToolbar";
-import InvestigationFieldsSidebar from "../components/InvestigationFieldsSidebar";
+import InvestigationFieldsSidebar, {
+  type FieldDisplaySetting,
+} from "../components/InvestigationFieldsSidebar";
 import InvestigationSetSidebar from "../components/InvestigationSetSidebar";
 import InvestigationTabs from "../components/InvestigationTabs";
 import TimelineChart from "../components/TimelineChart";
 import RecordsTable from "../components/RecordsTable";
-import DistributionCharts from "../components/DistributionCharts";
+import DistributionCharts, {
+  type DistributionChartSetting,
+} from "../components/DistributionCharts";
 import SaveAsgModal from "../components/SaveAsgModal";
+import CountermeasureModal from "../components/Countermeasure";
 
 import type {
   FieldFilter,
   SchemaResponse,
 } from "../components/filterTypes";
 
-import type { ASGTrend } from "../App";
+import type {
+  ASGCreateResult,
+  ASGTrend,
+  CountermeasureAction,
+} from "../App";
 
 /* ======================================================
    TYPES
@@ -71,7 +80,29 @@ interface Props {
     colorBy?: string;
     eventCount?: number;
     filters?: FieldFilter[];
-  }) => void;
+    countermeasure?: CountermeasureAction;
+  }) => ASGCreateResult;
+
+  /*
+    Reports the ASG that already flags this dataset
+    with the current filters, so the same issue cannot
+    be saved twice.
+  */
+  findExistingASG?: (
+    datasetId: number | undefined,
+    datasetName: string | undefined,
+    filters: FieldFilter[]
+  ) => ASGTrend | null;
+
+  /*
+    Used to add, edit or remove the countermeasure of
+    an ASG that is already open in the workspace.
+  */
+  onUpdateASG?: (
+    id: string,
+    updates: Partial<ASGTrend>
+  ) => void;
+
   initialASG?: ASGTrend | null;
 }
 
@@ -412,7 +443,7 @@ function getParentDatasetId(
   if (
     value === undefined ||
     value === null ||
-    value === ""
+    (value as any) === ""
   ) {
     return null;
   }
@@ -1184,6 +1215,8 @@ export default function InvestigationWorkspace({
   datasetId,
   navigate,
   onFlagTrend,
+  findExistingASG,
+  onUpdateASG,
   initialASG,
 }: Props) {
 
@@ -1312,18 +1345,34 @@ export default function InvestigationWorkspace({
     useState("");
 
   const [
+    fieldDisplaySettings,
+    setFieldDisplaySettings,
+  ] = useState<
+    Record<string, FieldDisplaySetting>
+  >({});
+
+  const [
     activeTab,
     setActiveTab,
   ] =
     useState("Time");
 
   const [
-    distributionType,
-    setDistributionType,
-  ] =
-    useState<
-      "bar" | "pie"
-    >("bar");
+    distributionChartSettings,
+    setDistributionChartSettings,
+  ] = useState<
+    Record<string, DistributionChartSetting>
+  >({});
+
+  const [
+    preferencesSaving,
+    setPreferencesSaving,
+  ] = useState(false);
+
+  const [
+    preferencesMessage,
+    setPreferencesMessage,
+  ] = useState("");
 
   const [
     saveAsgOpen,
@@ -1348,6 +1397,28 @@ export default function InvestigationWorkspace({
     setSaveAsgSuccess,
   ] =
     useState("");
+
+  const [
+    countermeasureOpen,
+    setCountermeasureOpen,
+  ] =
+    useState(false);
+
+  useEffect(() => {
+    if (!saveAsgSuccess) return;
+    const timer = setTimeout(() => {
+      setSaveAsgSuccess("");
+    }, 3500);
+    return () => clearTimeout(timer);
+  }, [saveAsgSuccess, setSaveAsgSuccess]);
+
+  useEffect(() => {
+    if (!saveAsgError) return;
+    const timer = setTimeout(() => {
+      setSaveAsgError("");
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [saveAsgError, setSaveAsgError]);
 
   /* ====================================================
      TIME CONFIGURATION
@@ -1461,6 +1532,44 @@ export default function InvestigationWorkspace({
 
     }, [schema]);
 
+  const getFieldDisplayLabel = (
+    fieldName: string
+  ) =>
+    fieldDisplaySettings[
+      fieldName
+    ]?.label.trim() || fieldName;
+
+  const configuredDateColumns =
+    dateColumns.filter(
+      (column) =>
+        fieldDisplaySettings[
+          column.name
+        ]?.showInDateBy !== false
+    );
+
+  const configuredCategoricalColumns =
+    categoricalColumns.filter(
+      (column) =>
+        fieldDisplaySettings[
+          column.name
+        ]?.showInColorBy !== false
+    );
+
+  const dataColumns =
+    (schema?.columns || []).filter(
+      (column) =>
+        fieldDisplaySettings[
+          column.name
+        ]?.showInData !== false
+    ).map(
+      (column) => ({
+        name: column.name,
+        label: getFieldDisplayLabel(
+          column.name
+        ),
+      })
+    );
+
   const [
     dateBy,
     setDateBy,
@@ -1526,7 +1635,7 @@ export default function InvestigationWorkspace({
 
     if (
       dateBy &&
-      !dateColumns.some(
+      !configuredDateColumns.some(
         (column) =>
           column.name ===
           dateBy
@@ -1537,7 +1646,7 @@ export default function InvestigationWorkspace({
 
     if (
       colorBy &&
-      !categoricalColumns.some(
+      !configuredCategoricalColumns.some(
         (column) =>
           column.name ===
           colorBy
@@ -1548,8 +1657,8 @@ export default function InvestigationWorkspace({
 
   }, [
     schema,
-    dateColumns,
-    categoricalColumns,
+    configuredDateColumns,
+    configuredCategoricalColumns,
     dateBy,
     colorBy,
   ]);
@@ -1563,6 +1672,71 @@ export default function InvestigationWorkspace({
     loadDatasetBundle();
 
   }, [datasetId]);
+
+  useEffect(() => {
+    async function loadViewPreferences() {
+      setPreferencesMessage("");
+
+      try {
+        const response = await fetch(
+          `http://localhost:5000/datasets/${datasetId}/view-preferences`
+        );
+
+        if (!response.ok) {
+          throw new Error("Unable to load saved view preferences.");
+        }
+
+        const saved = await response.json();
+
+        setFieldDisplaySettings(
+          saved.fieldSettings && typeof saved.fieldSettings === "object"
+            ? saved.fieldSettings
+            : {}
+        );
+        setDistributionChartSettings(
+          saved.chartSettings && typeof saved.chartSettings === "object"
+            ? saved.chartSettings
+            : {}
+        );
+      } catch (error) {
+        console.error("Load view preferences error:", error);
+        setFieldDisplaySettings({});
+        setDistributionChartSettings({});
+      }
+    }
+
+    loadViewPreferences();
+  }, [datasetId]);
+
+  async function saveViewPreferences() {
+    setPreferencesSaving(true);
+    setPreferencesMessage("");
+
+    try {
+      const response = await fetch(
+        `http://localhost:5000/datasets/${datasetId}/view-preferences`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            fieldSettings: fieldDisplaySettings,
+            chartSettings: distributionChartSettings,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error("Unable to save view preferences.");
+      }
+
+      setPreferencesMessage("Configuration saved for this dataset.");
+    } catch (error) {
+      console.error("Save view preferences error:", error);
+      setPreferencesMessage("Could not save configuration. Please try again.");
+    } finally {
+      setPreferencesSaving(false);
+    }
+  }
 
   async function loadDatasetBundle() {
 
@@ -2487,12 +2661,43 @@ export default function InvestigationWorkspace({
   }
 
   /* ====================================================
+     DUPLICATE ASG
+
+     Recomputed as the filters change, so the Save ASG
+     modal can warn before anything is saved.
+  ==================================================== */
+
+  const existingASG =
+    useMemo(
+      () => {
+
+        if (!findExistingASG) {
+          return null;
+        }
+
+        return findExistingASG(
+          datasetId,
+          logicalDatasetName,
+          getValidFilters(filters)
+        );
+
+      },
+      [
+        findExistingASG,
+        datasetId,
+        logicalDatasetName,
+        filters,
+      ]
+    );
+
+  /* ====================================================
      SAVE ASG
   ==================================================== */
 
   function saveAsg(
     title: string,
-    category: string
+    category: string,
+    countermeasure?: CountermeasureAction
   ) {
     try {
       setSavingAsg(true);
@@ -2501,18 +2706,41 @@ export default function InvestigationWorkspace({
       const validFilters =
         getValidFilters(filters);
 
-      onFlagTrend({
-        title: title.trim(),
-        category,
-        datasetId,
-        datasetName:
-          logicalDatasetName,
-        dateBy: dateBy || undefined,
-        colorBy: colorBy || undefined,
-        eventCount:
-          filteredEventCount,
-        filters: validFilters,
-      });
+      const result =
+        onFlagTrend({
+          title: title.trim(),
+          category,
+          datasetId,
+          datasetName:
+            logicalDatasetName,
+          dateBy: dateBy || undefined,
+          colorBy: colorBy || undefined,
+          eventCount:
+            filteredEventCount,
+          filters: validFilters,
+          countermeasure,
+        });
+
+      /*
+        The same dataset and filters are already
+        flagged, so the modal stays open and explains
+        which ASG covers this issue.
+      */
+      if (
+        result &&
+        !result.created
+      ) {
+        const duplicate =
+          result.duplicate;
+
+        setSaveAsgError(
+          duplicate
+            ? `This issue already exists as ${duplicate.number} — ${duplicate.title}. Change the filters or open the existing ASG.`
+            : "This issue already exists."
+        );
+
+        return;
+      }
 
       setSaveAsgOpen(false);
       setSaveAsgSuccess(
@@ -2526,6 +2754,45 @@ export default function InvestigationWorkspace({
     } finally {
       setSavingAsg(false);
     }
+  }
+
+  /* ====================================================
+     COUNTERMEASURE
+
+     Only available while an existing ASG is open.
+     For a new investigation the countermeasure is
+     captured by the Save ASG modal instead.
+  ==================================================== */
+
+  const canEditCountermeasure =
+    Boolean(
+      initialASG && onUpdateASG
+    );
+
+  function saveCountermeasure(
+    countermeasure?: CountermeasureAction
+  ) {
+    if (
+      !initialASG ||
+      !onUpdateASG
+    ) {
+      return;
+    }
+
+    onUpdateASG(
+      initialASG.id,
+      {
+        countermeasure,
+      }
+    );
+
+    setCountermeasureOpen(false);
+
+    setSaveAsgSuccess(
+      countermeasure
+        ? `Countermeasure saved: ${countermeasure.title}`
+        : "Countermeasure removed"
+    );
   }
 
 
@@ -2820,14 +3087,49 @@ export default function InvestigationWorkspace({
       {saveAsgSuccess && (
         <div
           style={{
+            position: "fixed",
+            top: 20,
+            right: 20,
+            zIndex: 9999,
             background: "#14532d",
             color: "#bbf7d0",
-            padding: "10px 20px",
+            padding: "12px 20px",
             fontSize: 13,
             fontWeight: 600,
+            borderRadius: 8,
+            border: "1px solid #22c55e",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            maxWidth: 420,
+            animation: "slideIn 0.3s ease-out",
           }}
         >
-          {saveAsgSuccess}
+          <span style={{ fontSize: 16 }}>✓</span>
+          <span style={{ flex: 1 }}>{saveAsgSuccess}</span>
+          <button
+            onClick={() => setSaveAsgSuccess("")}
+            style={{
+              background: "transparent",
+              border: "none",
+              color: "#bbf7d0",
+              cursor: "pointer",
+              fontSize: 16,
+              padding: 2,
+              lineHeight: 1,
+              opacity: 0.7,
+            }}
+            onMouseEnter={(e) =>
+              (e.currentTarget.style.opacity = "1")
+            }
+            onMouseLeave={(e) =>
+              (e.currentTarget.style.opacity = "0.7")
+            }
+            title="Dismiss"
+          >
+            ×
+          </button>
         </div>
       )}
 
@@ -2918,6 +3220,21 @@ export default function InvestigationWorkspace({
             }
             onFilterChange={
               handleFilterChange
+            }
+            fieldSettings={
+              fieldDisplaySettings
+            }
+            setFieldSettings={
+              setFieldDisplaySettings
+            }
+            onSaveSettings={
+              saveViewPreferences
+            }
+            savingSettings={
+              preferencesSaving
+            }
+            settingsMessage={
+              preferencesMessage
             }
           />
 
@@ -3129,7 +3446,7 @@ export default function InvestigationWorkspace({
                             Default Event Date
                           </option>
 
-                          {dateColumns.map(
+                          {configuredDateColumns.map(
                             (
                               column
                             ) => (
@@ -3143,7 +3460,9 @@ export default function InvestigationWorkspace({
                                 }
                               >
                                 {
-                                  column.name
+                                  getFieldDisplayLabel(
+                                    column.name
+                                  )
                                 }
                               </option>
 
@@ -3238,7 +3557,7 @@ export default function InvestigationWorkspace({
                             No Color Grouping
                           </option>
 
-                          {categoricalColumns.map(
+                          {configuredCategoricalColumns.map(
                             (
                               column
                             ) => (
@@ -3252,7 +3571,9 @@ export default function InvestigationWorkspace({
                                 }
                               >
                                 {
-                                  column.name
+                                  getFieldDisplayLabel(
+                                    column.name
+                                  )
                                 }
                               </option>
 
@@ -3285,6 +3606,109 @@ export default function InvestigationWorkspace({
                   </div>
 
                   {/* ==================================================
+                      COUNTERMEASURE
+                  ================================================== */}
+
+                  <div
+                    style={{
+                      background:
+                        "#111827",
+                      border:
+                        "1px solid #334155",
+                      borderRadius:
+                        10,
+                      padding:
+                        16,
+                      marginBottom:
+                        16,
+                      display:
+                        "flex",
+                      alignItems:
+                        "center",
+                      justifyContent:
+                        "space-between",
+                      gap:
+                        16,
+                      flexWrap:
+                        "wrap",
+                    }}
+                  >
+
+                    <div>
+
+                      <div
+                        style={{
+                          fontSize:
+                            15,
+                          fontWeight:
+                            600,
+                        }}
+                      >
+                        Countermeasure
+                      </div>
+
+                      <div
+                        style={{
+                          fontSize:
+                            12,
+                          color:
+                            "#94a3b8",
+                          marginTop:
+                            4,
+                        }}
+                      >
+                        {canEditCountermeasure
+                          ? initialASG?.countermeasure
+                            ? "Marked on the timeline below. Edit it to change the date, title or description."
+                            : "Mark the date an action was taken so its effect on the trend can be monitored."
+                          : "Save this investigation as an ASG first, then a countermeasure can be added at any time."}
+                      </div>
+
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setCountermeasureOpen(
+                          true
+                        )
+                      }
+                      disabled={
+                        !canEditCountermeasure
+                      }
+                      style={{
+                        padding:
+                          "9px 16px",
+                        border:
+                          "1px solid #b45309",
+                        borderRadius:
+                          6,
+                        background:
+                          "#78350f",
+                        color:
+                          "#fde68a",
+                        fontWeight:
+                          600,
+                        cursor:
+                          canEditCountermeasure
+                            ? "pointer"
+                            : "not-allowed",
+                        opacity:
+                          canEditCountermeasure
+                            ? 1
+                            : 0.5,
+                        whiteSpace:
+                          "nowrap",
+                      }}
+                    >
+                      {initialASG?.countermeasure
+                        ? "Edit countermeasure"
+                        : "Add countermeasure"}
+                    </button>
+
+                  </div>
+
+                  {/* ==================================================
                       TIMELINE
                   ================================================== */}
 
@@ -3304,9 +3728,12 @@ export default function InvestigationWorkspace({
                     dateBy={
                       dateBy
                     }
-                    colorBy={
-                      colorBy
-                    }
+                  colorBy={
+                    colorBy
+                  }
+                  countermeasure={
+                    initialASG?.countermeasure
+                  }
                   />
 
                 </div>
@@ -3327,11 +3754,20 @@ export default function InvestigationWorkspace({
                   schema={
                     schema
                   }
-                  chartType={
-                    distributionType
+                  chartSettings={
+                    distributionChartSettings
                   }
-                  setChartType={
-                    setDistributionType
+                  setChartSettings={
+                    setDistributionChartSettings
+                  }
+                  onSaveSettings={
+                    saveViewPreferences
+                  }
+                  savingSettings={
+                    preferencesSaving
+                  }
+                  settingsMessage={
+                    preferencesMessage
                   }
                   filtersApplied={
                     filtersApplied
@@ -3354,6 +3790,9 @@ export default function InvestigationWorkspace({
                   totalRecords={
                     filteredEventCount
                   }
+                  columns={
+                    dataColumns
+                  }
                 />
 
               )}
@@ -3373,8 +3812,28 @@ export default function InvestigationWorkspace({
         filters={getValidFilters(filters)}
         saving={savingAsg}
         errorMessage={saveAsgError}
+        duplicateASG={existingASG}
         onClose={() => setSaveAsgOpen(false)}
         onSave={saveAsg}
+      />
+
+      <CountermeasureModal
+        open={countermeasureOpen}
+        countermeasure={
+          initialASG?.countermeasure
+        }
+        asgLabel={
+          initialASG
+            ? `${initialASG.number} ${initialASG.title}`
+            : undefined
+        }
+        onClose={() =>
+          setCountermeasureOpen(false)
+        }
+        onSave={saveCountermeasure}
+        onRemove={() =>
+          saveCountermeasure(undefined)
+        }
       />
 
     </div>

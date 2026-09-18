@@ -11,7 +11,10 @@ import {
   XAxis,
   YAxis,
   Legend,
+  ReferenceLine,
 } from "recharts";
+
+import { formatCountermeasureDate } from "./countermeasureHelpers";
 
 /* ======================================================
    TYPES
@@ -60,6 +63,170 @@ interface TimelineChartProps {
     Empty string means no grouping.
   */
   colorBy?: string;
+
+  countermeasure?: {
+    date: string;
+    title?: string;
+    description?: string;
+  };
+}
+
+/* ======================================================
+   COUNTERMEASURE MARKER
+====================================================== */
+
+const COUNTERMEASURE_COLOR = "#f59e0b";
+
+const COUNTERMEASURE_LABEL_MAX_CHARS = 34;
+
+function truncateLabel(
+  value: string
+): string {
+
+  if (
+    value.length <=
+    COUNTERMEASURE_LABEL_MAX_CHARS
+  ) {
+    return value;
+  }
+
+  return `${value.slice(
+    0,
+    COUNTERMEASURE_LABEL_MAX_CHARS - 1
+  )}…`;
+}
+
+interface CountermeasureLabelProps {
+  /*
+    Supplied by Recharts.
+
+    For a vertical reference line:
+      x      = the line position
+      y      = the top of the plot area
+      height = the plot area height
+  */
+  viewBox?: {
+    x?: number;
+    y?: number;
+    width?: number;
+    height?: number;
+  };
+
+  title: string;
+  dateLabel: string;
+  description?: string;
+
+  /*
+    Keeps the badge inside the plot area when the
+    marker sits on the first or last month.
+  */
+  align: "start" | "middle" | "end";
+}
+
+function CountermeasureLabel({
+  viewBox,
+  title,
+  dateLabel,
+  description,
+  align,
+}: CountermeasureLabelProps) {
+
+  const x =
+    viewBox?.x ?? 0;
+
+  const y =
+    viewBox?.y ?? 0;
+
+  const text =
+    truncateLabel(title);
+
+  /*
+    SVG text has no layout, so the badge width is
+    estimated from the character count.
+  */
+  const width =
+    Math.max(
+      text.length * 6.7,
+      dateLabel.length * 6.2
+    ) + 22;
+
+  const height = 36;
+
+  const boxX =
+    align === "start"
+      ? x - 6
+      : align === "end"
+      ? x - width + 6
+      : x - width / 2;
+
+  const boxY =
+    y - height - 12;
+
+  return (
+    <g>
+
+      {/*
+        Native SVG tooltip, so the full title and the
+        description stay reachable even when the
+        badge text is truncated.
+      */}
+      <title>
+        {`${title} — ${dateLabel}${
+          description
+            ? `\n${description}`
+            : ""
+        }`}
+      </title>
+
+      <rect
+        x={boxX}
+        y={boxY}
+        width={width}
+        height={height}
+        rx={6}
+        fill="rgba(245, 158, 11, 0.15)"
+        stroke={COUNTERMEASURE_COLOR}
+      />
+
+      <text
+        x={boxX + 11}
+        y={boxY + 15}
+        fill="#fde68a"
+        fontSize={12}
+        fontWeight={600}
+      >
+        {text}
+      </text>
+
+      <text
+        x={boxX + 11}
+        y={boxY + 29}
+        fill={COUNTERMEASURE_COLOR}
+        fontSize={11}
+      >
+        {dateLabel}
+      </text>
+
+      {/* Connector between the badge and the line */}
+      <line
+        x1={x}
+        y1={boxY + height}
+        x2={x}
+        y2={y}
+        stroke={COUNTERMEASURE_COLOR}
+        strokeWidth={1}
+        strokeDasharray="3 3"
+      />
+
+      <circle
+        cx={x}
+        cy={y}
+        r={3.5}
+        fill={COUNTERMEASURE_COLOR}
+      />
+
+    </g>
+  );
 }
 
 /* ======================================================
@@ -571,6 +738,8 @@ export default function TimelineChart({
 
   colorBy = "",
 
+  countermeasure,
+
 }: TimelineChartProps) {
 
   /* ====================================================
@@ -600,6 +769,16 @@ export default function TimelineChart({
   const activeDateField =
     dateBy ||
     defaultEventDateField;
+
+  /*
+    The chart buckets events by month, so the
+    countermeasure line is drawn on the month that
+    contains the action date.
+  */
+  const countermeasureMonth =
+    countermeasure?.date
+      ? countermeasure.date.slice(0, 7)
+      : "";
 
   /* ====================================================
      BUILD TIMELINE FROM RECORDS
@@ -839,6 +1018,126 @@ export default function TimelineChart({
         colorBy,
         dateBy,
       ]
+    );
+
+  /* ====================================================
+     COUNTERMEASURE MONTH BUCKET
+
+     The X axis is categorical, so a reference line can
+     only be drawn on a month that exists in the data.
+
+     When no events fall in the countermeasure month, an
+     empty bucket is inserted so the marker still shows.
+     The bucket has no series keys, so it renders as a
+     gap rather than a zero bar.
+  ==================================================== */
+
+  const chartDataWithMarker =
+    useMemo(
+      () => {
+
+        if (
+          !countermeasureMonth ||
+          chartData.length === 0
+        ) {
+          return chartData;
+        }
+
+        const alreadyPresent =
+          chartData.some(
+            (
+              point: any
+            ) =>
+              point.month ===
+              countermeasureMonth
+          );
+
+        if (alreadyPresent) {
+          return chartData;
+        }
+
+        return [
+          ...chartData,
+          {
+            month:
+              countermeasureMonth,
+          },
+        ].sort(
+          (
+            first: any,
+            second: any
+          ) =>
+            String(
+              first.month
+            ).localeCompare(
+              String(
+                second.month
+              )
+            )
+        );
+
+      },
+      [
+        chartData,
+        countermeasureMonth,
+      ]
+    );
+
+  /*
+    Alignment of the marker badge, so it is not cut off
+    at the left or right edge of the plot area.
+  */
+  const countermeasureAlign =
+    useMemo(
+      () => {
+
+        const index =
+          chartDataWithMarker.findIndex(
+            (
+              point: any
+            ) =>
+              point.month ===
+              countermeasureMonth
+          );
+
+        if (
+          index < 0 ||
+          chartDataWithMarker.length < 3
+        ) {
+          return "middle" as const;
+        }
+
+        if (index === 0) {
+          return "start" as const;
+        }
+
+        if (
+          index ===
+          chartDataWithMarker.length - 1
+        ) {
+          return "end" as const;
+        }
+
+        return "middle" as const;
+
+      },
+      [
+        chartDataWithMarker,
+        countermeasureMonth,
+      ]
+    );
+
+  /*
+    Only true when the marker can actually be placed.
+  */
+  const showCountermeasureMarker =
+    Boolean(countermeasureMonth) &&
+    chartDataWithMarker.some(
+      (
+        point: any
+      ) =>
+        point.month ===
+        countermeasureMonth
     );
 
   /* ====================================================
@@ -1136,6 +1435,96 @@ export default function TimelineChart({
             }
           </div>
 
+          {countermeasure?.date && (
+
+            <div
+              style={{
+                marginTop:
+                  10,
+
+                display:
+                  "inline-flex",
+
+                flexDirection:
+                  "column",
+
+                gap:
+                  2,
+
+                padding:
+                  "8px 12px",
+
+                background:
+                  "rgba(245, 158, 11, 0.12)",
+
+                border:
+                  `1px solid ${COUNTERMEASURE_COLOR}`,
+
+                borderRadius:
+                  8,
+
+                maxWidth:
+                  520,
+              }}
+            >
+
+              <div
+                style={{
+                  fontSize:
+                    12,
+
+                  fontWeight:
+                    600,
+
+                  color:
+                    "#fde68a",
+                }}
+              >
+                Countermeasure ·{" "}
+                {
+                  formatCountermeasureDate(
+                    countermeasure.date
+                  )
+                }
+              </div>
+
+              <div
+                style={{
+                  fontSize:
+                    12,
+
+                  color:
+                    "#fbbf24",
+                }}
+              >
+                {
+                  countermeasure.title ||
+                  "Countermeasure"
+                }
+              </div>
+
+              {countermeasure.description && (
+
+                <div
+                  style={{
+                    fontSize:
+                      12,
+
+                    color:
+                      "#94a3b8",
+                  }}
+                >
+                  {
+                    countermeasure.description
+                  }
+                </div>
+
+              )}
+
+            </div>
+
+          )}
+
         </div>
 
         {/* EVENT COUNT */}
@@ -1302,12 +1691,19 @@ export default function TimelineChart({
 
             <BarChart
               data={
-                chartData
+                chartDataWithMarker
               }
 
               margin={{
+                /*
+                  Extra headroom so the countermeasure
+                  badge sits above the plot area
+                  instead of being clipped.
+                */
                 top:
-                  20,
+                  showCountermeasureMarker
+                    ? 64
+                    : 20,
 
                 right:
                   30,
@@ -1321,57 +1717,60 @@ export default function TimelineChart({
             >
 
               <CartesianGrid
-                stroke="#334155"
+                stroke="var(--border-subtle)"
                 strokeDasharray="3 3"
               />
 
               <XAxis
                 dataKey="month"
-                stroke="#cbd5e1"
-
+                stroke="var(--text-secondary)"
                 tick={{
-                  fill:
-                    "#cbd5e1",
-
-                  fontSize:
-                    12,
+                  fill: "var(--text-secondary)",
+                  fontSize: 12,
                 }}
               />
 
               <YAxis
-                stroke="#cbd5e1"
-
-                allowDecimals={
-                  false
-                }
-
+                stroke="var(--text-secondary)"
+                allowDecimals={false}
                 tick={{
-                  fill:
-                    "#cbd5e1",
-
-                  fontSize:
-                    12,
+                  fill: "var(--text-secondary)",
+                  fontSize: 12,
                 }}
               />
 
+              {/* ==================================================
+                  COUNTERMEASURE MARKER
+              ================================================== */}
+
+              {showCountermeasureMarker && (
+                <ReferenceLine
+                  x={countermeasureMonth}
+                  stroke={COUNTERMEASURE_COLOR}
+                  strokeWidth={2}
+                  strokeDasharray="6 4"
+                  ifOverflow="visible"
+                  label={(labelProps: { viewBox?: CountermeasureLabelProps["viewBox"] }) => (
+                    <CountermeasureLabel
+                      viewBox={labelProps?.viewBox}
+                      title={countermeasure?.title || "Countermeasure"}
+                      dateLabel={formatCountermeasureDate(countermeasure?.date || "")}
+                      description={countermeasure?.description}
+                      align={countermeasureAlign}
+                    />
+                  )}
+                />
+              )}
+
               <Tooltip
                 cursor={{
-                  fill:
-                    "rgba(59,130,246,0.08)",
+                  fill: "rgba(0, 229, 255, 0.08)",
                 }}
-
                 contentStyle={{
-                  background:
-                    "#0f172a",
-
-                  border:
-                    "1px solid #334155",
-
-                  borderRadius:
-                    8,
-
-                  color:
-                    "white",
+                  background: "var(--bg-input)",
+                  border: "1px solid var(--border-subtle)",
+                  borderRadius: 6,
+                  color: "var(--text-primary)",
                 }}
               />
 
@@ -1400,22 +1799,12 @@ export default function TimelineChart({
               ================================================== */}
 
               {!colorBy && (
-
                 <Bar
                   dataKey="count"
-
                   name="Events"
-
-                  fill="#3b82f6"
-
-                  radius={[
-                    4,
-                    4,
-                    0,
-                    0,
-                  ]}
+                  fill="var(--accent-cyan)"
+                  radius={[4, 4, 0, 0]}
                 />
-
               )}
 
               {/* ==================================================
@@ -1423,69 +1812,29 @@ export default function TimelineChart({
               ================================================== */}
 
               {colorBy &&
-                colorCategories.map(
-                  (
-                    category,
-                    index
-                  ) => (
-
-                    <Bar
-                      key={
-                        category
-                      }
-
-                      dataKey={
-                        category
-                      }
-
-                      /*
-                        IMPORTANT:
-
-                        Because category now contains
-                        only the individual parsed value,
-                        the legend will display:
-
-                          Bat
-                          Handle
-
-                        instead of:
-
-                          ["Bat", "Handle"]
-                      */
-                      name={
-                        category
-                      }
-
-                      fill={
-                        [
-                          "#3b82f6",
-                          "#22c55e",
-                          "#f59e0b",
-                          "#ef4444",
-                          "#a855f7",
-                          "#06b6d4",
-                          "#ec4899",
-                          "#84cc16",
-                          "#f97316",
-                          "#14b8a6",
-                        ][
-                          index %
-                          10
-                        ]
-                      }
-
-                      stackId="events"
-
-                      radius={[
-                        0,
-                        0,
-                        0,
-                        0,
-                      ]}
-                    />
-
-                  )
-                )}
+                colorCategories.map((category, index) => (
+                  <Bar
+                    key={category}
+                    dataKey={category}
+                    name={category}
+                    fill={
+                      [
+                        "#00E5FF",
+                        "#3B82F6",
+                        "#8B5CF6",
+                        "#F59E0B",
+                        "#10B981",
+                        "#EC4899",
+                        "#14B8A6",
+                        "#F97316",
+                        "#6366F1",
+                        "#84CC16",
+                      ][index % 10]
+                    }
+                    stackId="events"
+                    radius={[0, 0, 0, 0]}
+                  />
+                ))}
 
             </BarChart>
 

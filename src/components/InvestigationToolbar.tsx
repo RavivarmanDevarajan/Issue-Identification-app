@@ -18,148 +18,62 @@ export default function InvestigationToolbar({
   onSaveAsg,
 }: InvestigationToolbarProps) {
   return (
-    <div
-      style={{
-        height: 72,
-        background: "#111827",
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        padding: "0 30px",
-        borderBottom: "1px solid #334155",
-      }}
-    >
+    <div className="page-header-bar">
       {/* LEFT SECTION */}
-
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 18,
-        }}
-      >
-        <button
-          onClick={() => navigate("investigate")}
-          style={secondaryButton}
-        >
-          ← Back
+      <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+        <button onClick={() => navigate("investigate")} className="btn-secondary">
+          ← Catalog
         </button>
 
         <div>
-          <div
-            style={{
-              color: "white",
-              fontSize: 24,
-              fontWeight: 700,
-            }}
-          >
+          <h1 className="page-title">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-cyan)" strokeWidth="2.5">
+              <line x1="18" y1="20" x2="18" y2="10"/>
+              <line x1="12" y1="20" x2="12" y2="4"/>
+              <line x1="6" y1="20" x2="6" y2="14"/>
+            </svg>
             Investigation Workspace
-          </div>
-
-          <div
-            style={{
-              color: "#94a3b8",
-              fontSize: 13,
-              marginTop: 3,
-            }}
-          >
-            Explore • Filter • Analyze • Save
-          </div>
+          </h1>
+          <p className="page-subtitle">
+            Interactive multi-dimensional analytics, time-series, distribution breakdown & ASG flagging.
+          </p>
         </div>
       </div>
 
       {/* RIGHT SECTION */}
-
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 12,
-        }}
-      >
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         {filtersApplied && (
-          <div
-            style={{
-              background: "#16a34a",
-              color: "white",
-              padding: "7px 12px",
-              borderRadius: 20,
-              fontSize: 13,
-              fontWeight: 600,
-            }}
-          >
-            Filters Applied
-          </div>
+          <span className="badge badge-cyan" style={{ padding: "5px 10px", fontSize: 12 }}>
+            ✓ Active Filters Applied
+          </span>
         )}
 
         <button
           onClick={loadAllEvents}
           disabled={loadingTimeline}
-          style={primaryButton}
+          className="btn-secondary"
         >
-          {loadingTimeline
-            ? "Loading..."
-            : "Load All Events"}
+          {loadingTimeline ? "Loading..." : "Load All Events"}
         </button>
 
-        <button
-          onClick={downloadData}
-          style={purpleButton}
-        >
-          Download CSV
+        <button onClick={downloadData} className="btn-secondary">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          Export CSV
         </button>
 
-        <button
-          onClick={onSaveAsg}
-          style={saveButton}
-        >
+        <button onClick={onSaveAsg} className="btn-primary">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+            <polyline points="17 21 17 13 7 13 7 21"/>
+            <polyline points="7 3 7 8 15 8"/>
+          </svg>
           Save ASG
         </button>
       </div>
     </div>
   );
 }
-
-/* ======================================================
-   BUTTON STYLES
-====================================================== */
-
-const primaryButton: React.CSSProperties = {
-  background: "#2563eb",
-  color: "white",
-  border: "none",
-  padding: "10px 18px",
-  borderRadius: 6,
-  cursor: "pointer",
-  fontWeight: 600,
-};
-
-const secondaryButton: React.CSSProperties = {
-  background: "#374151",
-  color: "white",
-  border: "none",
-  padding: "10px 18px",
-  borderRadius: 6,
-  cursor: "pointer",
-  fontWeight: 600,
-};
-
-const purpleButton: React.CSSProperties = {
-  background: "#7c3aed",
-  color: "white",
-  border: "none",
-  padding: "10px 18px",
-  borderRadius: 6,
-  cursor: "pointer",
-  fontWeight: 600,
-};
-
-const saveButton: React.CSSProperties = {
-  background: "#16a34a",
-  color: "white",
-  border: "none",
-  padding: "10px 18px",
-  borderRadius: 6,
-  cursor: "pointer",
-  fontWeight: 600,
-};

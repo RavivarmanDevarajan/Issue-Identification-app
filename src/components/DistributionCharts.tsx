@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 
 import {
   ResponsiveContainer,
@@ -29,13 +29,22 @@ interface Props {
 
   schema: Schema | null;
 
-  chartType: "bar" | "pie";
+  chartSettings: Record<string, DistributionChartSetting>;
 
-  setChartType: (
-    value: "bar" | "pie"
-  ) => void;
+  setChartSettings: React.Dispatch<React.SetStateAction<Record<string, DistributionChartSetting>>>;
+
+  onSaveSettings: () => Promise<void>;
+
+  savingSettings: boolean;
+
+  settingsMessage: string;
 
   filtersApplied?: boolean;
+}
+
+export interface DistributionChartSetting {
+  visible: boolean;
+  chartType: "bar" | "pie";
 }
 
 /* ======================================================
@@ -62,10 +71,15 @@ const COLORS = [
 export default function DistributionCharts({
   records,
   schema,
-  chartType,
-  setChartType,
+  chartSettings,
+  setChartSettings,
+  onSaveSettings,
+  savingSettings,
+  settingsMessage,
   filtersApplied = false,
 }: Props) {
+
+  const [showConfiguration, setShowConfiguration] = useState(false);
 
   /* ====================================================
      FIND DISTRIBUTION COLUMNS
@@ -649,6 +663,34 @@ export default function DistributionCharts({
      EMPTY DATA
   ==================================================== */
 
+  const getChartSetting = (
+    columnName: string
+  ): DistributionChartSetting =>
+    chartSettings[columnName] || {
+      visible: true,
+      chartType: "bar",
+    };
+
+  const updateChartSetting = (
+    columnName: string,
+    change: Partial<DistributionChartSetting>
+  ) => {
+    setChartSettings((current) => ({
+      ...current,
+      [columnName]: {
+        ...(current[columnName] || {
+          visible: true,
+          chartType: "bar",
+        }),
+        ...change,
+      },
+    }));
+  };
+
+  const visibleColumns = categoricalColumns.filter(
+    (column) => getChartSetting(column.name).visible
+  );
+
   if (
     records.length === 0
   ) {
@@ -729,74 +771,81 @@ export default function DistributionCharts({
 
         </div>
 
-        {/* ==================================================
-            CHART TOGGLE
-        ================================================== */}
-
-        <div
+        <button
+          onClick={() => setShowConfiguration((open) => !open)}
           style={{
-            display: "flex",
-            gap: 10,
+            padding: "8px 16px",
+            border: "1px solid #475569",
+            borderRadius: 6,
+            cursor: "pointer",
+            background: showConfiguration ? "#2563eb" : "#334155",
+            color: "white",
           }}
         >
-
-          <button
-            onClick={() =>
-              setChartType(
-                "bar"
-              )
-            }
-            style={{
-              padding:
-                "8px 16px",
-              border: "none",
-              borderRadius: 6,
-              cursor:
-                "pointer",
-              background:
-                chartType ===
-                "bar"
-                  ? "#2563eb"
-                  : "#334155",
-              color: "white",
-            }}
-          >
-            Histogram
-          </button>
-
-          <button
-            onClick={() =>
-              setChartType(
-                "pie"
-              )
-            }
-            style={{
-              padding:
-                "8px 16px",
-              border: "none",
-              borderRadius: 6,
-              cursor:
-                "pointer",
-              background:
-                chartType ===
-                "pie"
-                  ? "#2563eb"
-                  : "#334155",
-              color: "white",
-            }}
-          >
-            Pie
-          </button>
-
-        </div>
+          {showConfiguration ? "Close configuration" : "Configure charts"}
+        </button>
 
       </div>
+
+      {showConfiguration && (
+        <section
+          aria-label="Distribution chart configuration"
+          style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 10, padding: 16 }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 12 }}>
+            <div style={{ color: "#cbd5e1", fontWeight: 600 }}>
+              Choose the fields to display and the chart type for each one.
+            </div>
+            <button
+              onClick={onSaveSettings}
+              disabled={savingSettings}
+              style={{ padding: "7px 12px", border: "none", borderRadius: 5, cursor: savingSettings ? "wait" : "pointer", background: "#2563eb", color: "white", opacity: savingSettings ? 0.7 : 1 }}
+            >
+              {savingSettings ? "Saving..." : "Save configuration"}
+            </button>
+          </div>
+
+          {categoricalColumns.map((column) => {
+            const setting = getChartSetting(column.name);
+            return (
+              <div key={column.name} style={{ display: "flex", alignItems: "center", gap: 14, padding: "10px 0", borderTop: "1px solid #334155", flexWrap: "wrap" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 220, cursor: "pointer" }}>
+                  <input type="checkbox" checked={setting.visible} onChange={(event) => updateChartSetting(column.name, { visible: event.target.checked })} />
+                  <span>{column.name}</span>
+                </label>
+
+                <div style={{ display: "flex", gap: 6 }}>
+                  {(["bar", "pie"] as const).map((type) => (
+                    <button
+                      key={type}
+                      disabled={!setting.visible}
+                      onClick={() => updateChartSetting(column.name, { chartType: type })}
+                      style={{ padding: "6px 10px", border: "none", borderRadius: 5, cursor: setting.visible ? "pointer" : "not-allowed", background: setting.chartType === type ? "#2563eb" : "#475569", color: "white", opacity: setting.visible ? 1 : 0.45 }}
+                    >
+                      {type === "bar" ? "Histogram" : "Pie"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+          {settingsMessage && (
+            <div style={{ color: settingsMessage.startsWith("Could") ? "#fca5a5" : "#86efac", marginTop: 12, fontSize: 13 }}>
+              {settingsMessage}
+            </div>
+          )}
+        </section>
+      )}
 
       {/* ==================================================
           CHARTS
       ================================================== */}
 
-      {categoricalColumns.map(
+      {visibleColumns.length === 0 ? (
+        <div style={{ color: "#94a3b8", textAlign: "center", padding: 32 }}>
+          No charts are selected. Use “Configure charts” to choose fields.
+        </div>
+      ) : visibleColumns.map(
         (column) => {
 
           const chartData =
@@ -808,6 +857,11 @@ export default function DistributionCharts({
             isListColumn(
               column
             );
+
+          const chartType =
+            getChartSetting(
+              column.name
+            ).chartType;
 
           return (
 

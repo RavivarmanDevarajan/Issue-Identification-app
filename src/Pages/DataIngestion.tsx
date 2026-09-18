@@ -89,6 +89,18 @@ export default function DataIngestion({
     null
   );
 
+  const [
+    refreshDatasetId,
+    setRefreshDatasetId,
+  ] = useState<number | null>(
+    null
+  );
+
+  const [
+    refreshDatasetMeta,
+    setRefreshDatasetMeta,
+  ] = useState<any>(null);
+
   /*
     Existing Raw datasets available
     for Tagged Data ingestion.
@@ -374,6 +386,92 @@ export default function DataIngestion({
   }
 
   /* ====================================================
+     REFRESH MODE — SELECT EXISTING DATASET
+  ==================================================== */
+
+  function handleSelectRefreshDataset(
+    datasetId: number,
+    datasetMeta: any
+  ) {
+
+    setRefreshDatasetId(
+      datasetId
+    );
+
+    setRefreshDatasetMeta(
+      datasetMeta || null
+    );
+
+    const metaType =
+      String(
+        datasetMeta?.data_type ??
+        datasetMeta?.dataType ??
+        datasetMeta?.ingestionType ??
+        ""
+      ).toLowerCase();
+
+    if (
+      metaType === "raw"
+    ) {
+
+      setIngestionType(
+        "raw"
+      );
+
+      setParentDatasetId(null);
+
+    } else if (
+      metaType === "tagged"
+    ) {
+
+      setIngestionType(
+        "tagged"
+      );
+
+      if (
+        datasetMeta?.parent_dataset_id ??
+        datasetMeta?.parentDatasetId
+      ) {
+
+        const parentId =
+          Number(
+            datasetMeta?.parent_dataset_id ??
+            datasetMeta?.parentDatasetId
+          );
+
+        setParentDatasetId(
+          parentId
+        );
+
+      }
+
+    }
+
+    if (
+      datasetMeta?.dataset_name ??
+      datasetMeta?.datasetName
+    ) {
+
+      setDatasetName(
+        (
+          datasetMeta?.dataset_name ??
+          datasetMeta?.datasetName ??
+          ""
+        ).toString()
+      );
+
+    }
+
+  }
+
+  function clearRefreshMode() {
+
+    setRefreshDatasetId(null);
+    setRefreshDatasetMeta(null);
+
+  }
+
+  /* ====================================================
      NEXT FROM DATASET STEP
   ==================================================== */
 
@@ -473,6 +571,29 @@ export default function DataIngestion({
 
   }
 
+  function handleResetAll() {
+
+    setStep(1);
+    setFileData([]);
+    setFileName("");
+    setDatasetName("");
+    setIngestionType("raw");
+    setParentDatasetId(null);
+    clearRefreshMode();
+
+  }
+
+  function handleHeaderBackReset() {
+    if (step === 1 && !refreshDatasetId && fileData.length === 0 && !fileName) {
+      if (typeof navigate === "function") {
+        navigate("home");
+      }
+      return;
+    }
+
+    handleResetAll();
+  }
+
   /* ====================================================
      RENDER
   ==================================================== */
@@ -505,172 +626,217 @@ export default function DataIngestion({
           HEADER
       ================================================== */}
 
-      <div
-        style={{
-          height:
-            80,
+      <div className="page-header-bar" style={{ height: "auto", flexDirection: "column", gap: refreshDatasetId ? 14 : 0 }}>
+        <div style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          {/* HEADER LEFT */}
+          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+            <button onClick={handleHeaderBackReset} className="btn-secondary">
+              ← Back / Reset
+            </button>
+            <div>
+              <h1 className="page-title">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--accent-cyan)" strokeWidth="2.5">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                  <polyline points="17 8 12 3 7 8"/>
+                  <line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+                Data Ingestion & Pipeline Configuration
+              </h1>
+              <p className="page-subtitle">
+                Upload CSV datasets, configure ontology mappings, validate schemas, and manage raw/tagged data.
+              </p>
+            </div>
+          </div>
 
-          display:
-            "flex",
+          {/* STEP INDICATOR */}
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            {[
+              { num: 1, label: "Upload" },
+              { num: 2, label: "Preview" },
+              { num: 3, label: "Dataset" },
+              { num: 4, label: "Schema" },
+            ].map((st, idx) => (
+              <React.Fragment key={st.num}>
+                {idx > 0 && (
+                  <div
+                    style={{
+                      width: 24,
+                      height: 2,
+                      backgroundColor: step >= st.num ? "var(--accent-cyan)" : "var(--border-subtle)",
+                      transition: "all 0.2s ease",
+                    }}
+                  />
+                )}
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "6px 12px",
+                    borderRadius: 20,
+                    backgroundColor: step === st.num ? "var(--accent-dim)" : step > st.num ? "var(--bg-card-active)" : "var(--bg-input)",
+                    border: step === st.num ? "1px solid var(--border-cyan)" : "1px solid var(--border-subtle)",
+                    color: step === st.num ? "var(--accent-cyan)" : step > st.num ? "var(--text-primary)" : "var(--text-muted)",
+                    fontSize: 12,
+                    fontWeight: 600,
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 20,
+                      height: 20,
+                      borderRadius: "50%",
+                      backgroundColor: step >= st.num ? "var(--accent-cyan)" : "var(--border-medium)",
+                      color: step >= st.num ? "#000" : "var(--text-muted)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontSize: 11,
+                      fontWeight: 700,
+                    }}
+                  >
+                    {st.num}
+                  </span>
+                  <span>{st.label}</span>
+                </div>
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
 
-          alignItems:
-            "center",
+        {refreshDatasetId && (
 
-          justifyContent:
-            "space-between",
-
-          padding:
-            "0 35px",
-
-          borderBottom:
-            "1px solid #334155",
-
-          background:
-            "#111827",
-        }}
-      >
-
-        {/* ==================================================
-            HEADER LEFT
-        ================================================== */}
-
-        <div
-          style={{
-            display:
-              "flex",
-
-            alignItems:
-              "center",
-
-            gap:
-              20,
-          }}
-        >
-
-          <button
-            onClick={() =>
-              navigate(
-                "home"
-              )
-            }
-
+          <div
             style={{
+              width: "100%",
               padding:
-                "10px 18px",
-
-              border:
-                "none",
-
-              borderRadius:
-                6,
-
+                "10px 16px",
               background:
-                "#475569",
-
-              color:
-                "white",
-
-              cursor:
-                "pointer",
+                "#78350f",
+              border:
+                "1px solid #b45309",
+              borderRadius:
+                8,
+              display:
+                "flex",
+              alignItems:
+                "center",
+              justifyContent:
+                "space-between",
+              gap:
+                16,
             }}
           >
-            ← Back
-          </button>
 
-          <div>
-
-            <h1
+            <div
               style={{
-                margin:
-                  0,
+                display:
+                  "flex",
+                alignItems:
+                  "center",
+                gap:
+                  10,
+              }}
+            >
 
+              <span
+                style={{
+                  fontSize:
+                    18,
+                }}
+              >
+                🔄
+              </span>
+
+              <div>
+
+                <div
+                  style={{
+                    fontWeight:
+                      700,
+                    color:
+                      "#fde68a",
+                    fontSize:
+                      14,
+                  }}
+                >
+                  Refresh Mode — Updating existing dataset
+                </div>
+
+                <div
+                  style={{
+                    fontSize:
+                      12,
+                    color:
+                      "#fcd34d",
+                    marginTop:
+                      2,
+                  }}
+                >
+                  Dataset:
+                  {" "}
+                  <strong>
+                    {datasetName ||
+                      refreshDatasetMeta
+                        ?.dataset_name ||
+                      refreshDatasetMeta
+                        ?.datasetName ||
+                      `#${refreshDatasetId}`}
+                  </strong>
+                  {" • "}
+                  Type:
+                  {" "}
+                  <strong>
+                    {(
+                      refreshDatasetMeta
+                        ?.data_type ??
+                      refreshDatasetMeta
+                        ?.dataType ??
+                      ingestionType
+                    )?.toString()
+                      .toUpperCase() ??
+                      "—"}
+                  </strong>
+                  {" • "}
+                  Schema & ontology mappings are
+                  <em>
+                    {" "}
+                    reused from the original upload
+                  </em>
+                  .
+                </div>
+
+              </div>
+
+            </div>
+
+            <button
+              onClick={handleResetAll}
+              style={{
+                padding:
+                  "6px 12px",
                 fontSize:
-                  30,
-
+                  12,
+                background:
+                  "#1f2937",
                 color:
-                  "#f8fafc",
+                  "#fde68a",
+                border:
+                  "1px solid #92400e",
+                borderRadius:
+                  6,
+                cursor:
+                  "pointer",
+                fontWeight:
+                  600,
               }}
             >
-              📥 Data Ingestion
-            </h1>
-
-            <p
-              style={{
-                marginTop:
-                  5,
-
-                color:
-                  "#94a3b8",
-              }}
-            >
-              Upload and configure engineering
-              datasets for investigation
-            </p>
+              Exit Refresh Mode
+            </button>
 
           </div>
 
-        </div>
-
-        {/* ==================================================
-            STEP INDICATOR
-        ================================================== */}
-
-        <div
-          style={{
-            display:
-              "flex",
-
-            gap:
-              10,
-          }}
-        >
-
-          {[1, 2, 3, 4].map(
-            (s) => (
-
-              <div
-                key={
-                  s
-                }
-
-                style={{
-                  width:
-                    36,
-
-                  height:
-                    36,
-
-                  borderRadius:
-                    "50%",
-
-                  display:
-                    "flex",
-
-                  alignItems:
-                    "center",
-
-                  justifyContent:
-                    "center",
-
-                  background:
-                    step >= s
-                      ? "#2563eb"
-                      : "#334155",
-
-                  color:
-                    "white",
-
-                  fontWeight:
-                    600,
-                }}
-              >
-                {s}
-              </div>
-
-            )
-          )}
-
-        </div>
+        )}
 
       </div>
 
@@ -711,6 +877,18 @@ export default function DataIngestion({
               setStep(2)
             }
 
+            onSelectRefreshDataset={
+              handleSelectRefreshDataset
+            }
+
+            selectedRefreshDatasetId={
+              refreshDatasetId
+            }
+
+            setSelectedRefreshDatasetId={
+              setRefreshDatasetId
+            }
+
           />
 
         )}
@@ -733,6 +911,14 @@ export default function DataIngestion({
 
             back={() =>
               setStep(1)
+            }
+
+            refreshDatasetId={
+              refreshDatasetId
+            }
+
+            refreshDatasetMeta={
+              refreshDatasetMeta
             }
 
           />
@@ -795,6 +981,22 @@ export default function DataIngestion({
               setStep(2)
             }
 
+            /* ============================================
+               REFRESH MODE PROPS
+            ============================================ */
+
+            refreshDatasetId={
+              refreshDatasetId
+            }
+
+            refreshDatasetMeta={
+              refreshDatasetMeta
+            }
+
+            clearRefreshMode={
+              clearRefreshMode
+            }
+
           />
 
         )}
@@ -839,6 +1041,29 @@ export default function DataIngestion({
 
             back={
               handleBackToDataset
+            }
+
+            /*
+              A finished upload ends the ingestion
+              flow and returns to the main window.
+            */
+
+            onUploaded={() =>
+              navigate(
+                "home"
+              )
+            }
+
+            /* ============================================
+               REFRESH MODE PROPS
+            ============================================ */
+
+            refreshDatasetId={
+              refreshDatasetId
+            }
+
+            refreshDatasetMeta={
+              refreshDatasetMeta
             }
 
           />
