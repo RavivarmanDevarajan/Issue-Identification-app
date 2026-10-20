@@ -11,6 +11,9 @@ import DataIngestion from "./Pages/DataIngestion";
 import Investigation from "./Pages/Investigation";
 import InvestigationWorkspace from "./Pages/InvestigationWorkspace";
 import Asgs from "./Pages/Asgs";
+import LLMTagging from "./Pages/LlmTagging";
+import TaxonomyRefinement from "./Pages/TaxonomyRefinement";
+import TransformFunctions from "./Pages/TransformFunctions";
 import Sidebar from "./components/Sidebar";
 
 import type {
@@ -24,7 +27,10 @@ type Page =
   | "ingestion"
   | "investigate"
   | "workspace"
-  | "asgs";
+  | "asgs"
+  | "tagging"
+  | "taxonomy"
+  | "transforms";
 
 /* ======================================================
    ASG TYPES
@@ -2199,6 +2205,29 @@ function App() {
               getASGEventCount={getASGEventCount}
               dynamicEventCounts={asgEventCounts}
             />
+          )}
+
+          {/* ==================================================
+              LLM TAGGING (OLLAMA PREVIEW & BATCH)
+          ================================================== */}
+
+          {page === "tagging" && (
+            <LLMTagging
+              navigate={setPage}
+              selectedDatasetId={selectedDatasetId}
+              onDatasetTagged={(newTaggedId) => {
+                setSelectedDatasetId(newTaggedId);
+                setPage("investigate");
+              }}
+            />
+          )}
+
+          {page === "taxonomy" && (
+            <TaxonomyRefinement navigate={setPage} />
+          )}
+
+          {page === "transforms" && (
+            <TransformFunctions navigate={setPage} />
           )}
 
         </div>

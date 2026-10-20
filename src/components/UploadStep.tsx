@@ -6,12 +6,11 @@ export default function UploadStep({
   setFileName,
   next,
   onSelectRefreshDataset,
+  onCreateNewDataset,
   selectedRefreshDatasetId,
-  setSelectedRefreshDatasetId,
 }: any) {
   const [datasets, setDatasets] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [parsingRefresh, setParsingRefresh] = useState<any>(null);
   const [isDragging, setIsDragging] = useState(false);
 
   useEffect(() => {
@@ -60,38 +59,6 @@ export default function UploadStep({
     if (file) processFile(file);
   };
 
-  const handleRefreshFileSelect = (datasetId: number, dataset: any) => {
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = ".csv";
-    input.onchange = (e: any) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-
-      setParsingRefresh(datasetId);
-      setFileName(file.name);
-
-      Papa.parse(file, {
-        header: true,
-        skipEmptyLines: true,
-        complete: (results) => {
-          setFileData(results.data);
-          if (onSelectRefreshDataset) {
-            onSelectRefreshDataset(datasetId, dataset);
-          }
-          setParsingRefresh(null);
-          next();
-        },
-        error: (error) => {
-          console.error("CSV Parse Error:", error);
-          alert("Failed to parse CSV file");
-          setParsingRefresh(null);
-        },
-      });
-    };
-    input.click();
-  };
-
   const downloadDataset = async (id: number) => {
     try {
       const response = await fetch(`http://localhost:5000/datasets/${id}/download`);
@@ -137,31 +104,35 @@ export default function UploadStep({
           <span className="badge badge-cyan">CSV Format</span>
         </div>
 
-        {selectedRefreshDatasetId && (
-          <div
-            style={{
-              marginBottom: 18,
-              padding: "12px 16px",
-              background: "rgba(245, 158, 11, 0.12)",
-              border: "1px solid rgba(245, 158, 11, 0.3)",
-              borderRadius: "var(--radius-md)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
+        <div style={{ marginBottom: 18 }}>
+          <label htmlFor="dataset-destination" style={{ display: "block", marginBottom: 7, fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>
+            Upload destination
+          </label>
+          <select
+            id="dataset-destination"
+            value={selectedRefreshDatasetId ? String(selectedRefreshDatasetId) : "new"}
+            onChange={(event) => {
+              const value = event.target.value;
+              if (value === "new") {
+                onCreateNewDataset?.();
+                return;
+              }
+              const target = datasets.find((dataset) => String(dataset.id) === value);
+              if (target) onSelectRefreshDataset?.(target.id, target);
             }}
+            style={{ width: "100%", maxWidth: 560 }}
           >
-            <div style={{ fontSize: 13, color: "#FCD34D" }}>
-              <strong>🔄 Active Refresh Target:</strong> Dataset #{selectedRefreshDatasetId}. Select a CSV file below to perform incremental refresh.
-            </div>
-            <button
-              onClick={() => setSelectedRefreshDatasetId && setSelectedRefreshDatasetId(null)}
-              className="btn-secondary"
-              style={{ padding: "4px 10px", fontSize: 12 }}
-            >
-              Clear Target
-            </button>
+            <option value="new">Create a new dataset</option>
+            {datasets.map((dataset) => (
+              <option key={dataset.id} value={dataset.id}>
+                {dataset.dataset_name || `Dataset #${dataset.id}`} ({String(dataset.data_type || dataset.dataType || "raw").toUpperCase()})
+              </option>
+            ))}
+          </select>
+          <div style={{ marginTop: 7, color: "var(--text-muted)", fontSize: 12 }}>
+            Selecting an existing dataset updates matching IDs and appends new IDs. New CSV headers become additional dataset columns.
           </div>
-        )}
+        </div>
 
         {/* Dropzone Container */}
         <div
@@ -224,25 +195,9 @@ export default function UploadStep({
               <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
               <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
             </svg>
-            Previous Ingestions & Incremental Refreshes
+            Existing Datasets
           </div>
           <span className="badge badge-gray">{datasets.length} Ingested Datasets</span>
-        </div>
-
-        <div
-          style={{
-            marginBottom: 16,
-            padding: "12px 16px",
-            background: "var(--accent-dim)",
-            border: "1px solid var(--border-cyan)",
-            borderRadius: "var(--radius-md)",
-            color: "var(--text-secondary)",
-            fontSize: 12,
-            lineHeight: 1.6,
-          }}
-        >
-          <strong style={{ color: "var(--accent-cyan)" }}>💡 Upsert Ingestion Tip:</strong> Click{" "}
-          <span style={{ color: "var(--status-investigate)", fontWeight: 700 }}>↻ Refresh</span> on any existing dataset to update it with new events. Schema and ontology mappings are reused automatically. Matching <code>_id</code> records will be updated; new records will be appended.
         </div>
 
         {loading ? (
@@ -296,19 +251,6 @@ export default function UploadStep({
                           style={{ fontSize: 12, padding: "4px 8px" }}
                         >
                           Download
-                        </button>
-                        <button
-                          disabled={parsingRefresh === dataset.id}
-                          onClick={() => handleRefreshFileSelect(dataset.id, dataset)}
-                          className="btn-secondary"
-                          style={{
-                            fontSize: 12,
-                            padding: "4px 10px",
-                            borderColor: "var(--status-investigate)",
-                            color: "var(--status-investigate)",
-                          }}
-                        >
-                          {parsingRefresh === dataset.id ? "Parsing..." : "↻ Refresh"}
                         </button>
                       </div>
                     </td>

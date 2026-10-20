@@ -2378,7 +2378,7 @@ export default function SchemaBuilder({
                   marginBottom: 6,
                 }}
               >
-                🔄 Refresh Mode — Schema Locked
+                🔄 Update Existing Dataset
               </div>
 
               <div
@@ -2388,10 +2388,10 @@ export default function SchemaBuilder({
                   lineHeight: 1.5,
                 }}
               >
-                The column types and ontology mappings below are reused from the
-                original dataset upload and are not editable. Records with a
-                matching <strong>_id</strong> will be overwritten; new records
-                will be appended. No existing records are deleted.
+                Existing column types and ontology mappings are reused. Records
+                with a matching <strong>_id</strong> will be overwritten; new
+                records will be appended. New CSV headers are added as dataset
+                columns. No existing records are deleted.
               </div>
 
             </div>
@@ -2419,8 +2419,8 @@ export default function SchemaBuilder({
                 }}
               >
                 {refreshError.type === "HEADER_MISMATCH"
-                  ? "❌ CSV Headers Do Not Match The Original Dataset"
-                  : "❌ Refresh Error"}
+                  ? "❌ Required Dataset Headers Are Missing"
+                  : "❌ Dataset Update Error"}
               </div>
 
               {refreshError.type === "HEADER_MISMATCH" ? (
@@ -2521,7 +2521,7 @@ export default function SchemaBuilder({
                   marginBottom: 8,
                 }}
               >
-                ✓ Refresh Preview
+                ✓ Dataset Update Preview
               </div>
 
               <div
@@ -2551,11 +2551,19 @@ export default function SchemaBuilder({
                   Total records before:{" "}
                   <strong>{refreshPreviewResult.totalBefore ?? "—"}</strong>
                   {" → "}
-                  after refresh:{" "}
+                  after update:{" "}
                   <strong style={{ color: "#4ade80" }}>
                     {refreshPreviewResult.totalAfter ?? "—"}
                   </strong>
                 </div>
+
+                {(refreshPreviewResult.addedColumns ?? []).length > 0 && (
+                  <div style={{ marginTop: 8 }}>
+                    New dataset columns: <strong style={{ color: "#4ade80" }}>
+                      {refreshPreviewResult.addedColumns.join(", ")}
+                    </strong>
+                  </div>
+                )}
 
                 {(refreshPreviewResult.taggedOrphanCount ?? 0) > 0 && (
                   <div
@@ -2590,7 +2598,7 @@ export default function SchemaBuilder({
                     lineHeight: 1.5,
                   }}
                 >
-                  Click <strong>"Confirm Refresh"</strong> below to apply these
+                  Click <strong>"Update Dataset"</strong> below to apply these
                   changes. This is the last step before the dataset is
                   updated.
                 </div>
@@ -3297,7 +3305,7 @@ export default function SchemaBuilder({
           {uploading || refreshingDataset
             ? "Syncing Dataset..."
             : refreshDatasetId
-            ? "🔄 Refresh & Sync Dataset"
+            ? "🔄 Update Dataset"
             : "Upload & Complete Ingestion →"}
         </button>
       </div>

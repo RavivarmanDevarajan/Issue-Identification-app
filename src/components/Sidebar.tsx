@@ -3,6 +3,9 @@ import React from "react";
 export type Page =
   | "home"
   | "ingestion"
+  | "tagging"
+  | "taxonomy"
+  | "transforms"
   | "investigate"
   | "workspace"
   | "asgs";
@@ -39,6 +42,37 @@ export default function Sidebar({
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
           <polyline points="17 8 12 3 7 8"/>
           <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+      ),
+    },
+    {
+      id: "tagging" as Page,
+      label: "LLM Tagging",
+      icon: (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l6.58-6.58c.94-.94.94-2.48 0-3.42L12 2Z" />
+          <circle cx="7" cy="7" r="1.5" fill="currentColor" />
+        </svg>
+      ),
+    },
+    {
+      id: "taxonomy" as Page,
+      label: "Taxonomy Refinement",
+      icon: (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 21 12 17.77 5.82 21 7 14.14 2 9.27l6.91-1.01L12 2z" />
+        </svg>
+      ),
+    },
+    {
+      id: "transforms" as Page,
+      label: "Transform Functions",
+      icon: (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="16 3 21 3 21 8"/>
+          <line x1="4" y1="20" x2="21" y2="3"/>
+          <polyline points="21 16 21 21 16 21"/>
+          <line x1="15" y1="15" x2="21" y2="21"/>
         </svg>
       ),
     },
@@ -136,7 +170,7 @@ export default function Sidebar({
         <nav style={{ padding: "16px 12px", display: "flex", flexDirection: "column", gap: 4 }}>
           {navItems.map((item) => {
             const isActive = currentPage === item.id;
-            const isDisabled = item.disabled;
+            const isDisabled = (item as any).disabled;
 
             return (
               <button
@@ -186,7 +220,7 @@ export default function Sidebar({
                   <span>{item.label}</span>
                 </div>
 
-                {item.badge && (
+                {(item as any).badge && (
                   <span
                     style={{
                       fontSize: 10,
@@ -198,7 +232,7 @@ export default function Sidebar({
                       textTransform: "uppercase",
                     }}
                   >
-                    {item.badge}
+                    {(item as any).badge}
                   </span>
                 )}
 

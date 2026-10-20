@@ -1,6 +1,21 @@
 import React from "react";
 import Papa from "papaparse";
 
+function formatCellValue(value: unknown): string {
+  if (Array.isArray(value)) return value.map(String).join(", ");
+  if (typeof value !== "string") return String(value ?? "");
+  const text = value.trim();
+  if (!text.startsWith("[") || !text.endsWith("]")) return value;
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) return parsed.map(String).join(", ");
+  } catch {
+    const inner = text.slice(1, -1);
+    return inner.split(",").map((item) => item.trim().replace(/^['"]|['"]$/g, "")).filter(Boolean).join(", ") || value;
+  }
+  return value;
+}
+
 interface RecordsTableProps {
   records: any[];
   totalRecords?: number;
@@ -94,7 +109,7 @@ export default function RecordsTable({
                   <td style={{ color: "var(--text-muted)", fontSize: 12 }}>{index + 1}</td>
                   {displayedColumns.map((column) => (
                     <td key={column.name} style={{ whiteSpace: "nowrap" }}>
-                      {String(row[column.name] ?? "")}
+                      {formatCellValue(row[column.name])}
                     </td>
                   ))}
                 </tr>

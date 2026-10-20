@@ -1,0 +1,26 @@
+# Dependencies and build outputs
+node_modules
+dist
+.npm
+
+# Database and data persistence files
+src/Backend/database.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Git and IDE configuration
+.git
+.gitignore
+.vscode
+.idea
+.gemini
+
+# Log files
+*.log
+npm-debug.log*
+
+# Environment files
+.env
+.env.local
+.env.*.local

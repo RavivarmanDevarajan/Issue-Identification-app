@@ -2,6 +2,17 @@ import express from "express";
 import cors from "cors";
 import Database from "better-sqlite3";
 import Papa from "papaparse";
+import path from "path";
+import { fileURLToPath } from "url";
+import {
+  expandRawValues,
+  applyParseRule,
+  applyStringMapper,
+  applyColumnCombiner,
+} from "./transformEngine.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 
@@ -12,9 +23,11 @@ app.use(express.json());
    DATABASE
 ======================================================= */
 
-const db = new Database("database.db");
+const dbPath = process.env.DB_PATH || path.join(__dirname, "database.db");
+const db = new Database(dbPath);
+db.pragma("foreign_keys = ON");
 
-console.log("SQLite Connected");
+console.log("SQLite Connected at:", dbPath);
 
 /* =======================================================
    TABLE
@@ -108,6 +121,98 @@ if (!hasLastRefreshedAt) {
     "last_refreshed_at column added successfully"
   );
 }
+
+const hasUpdatedAt =
+  datasetColumns.some(
+    (column) =>
+      column.name === "updated_at"
+  ) ||
+  db.prepare(`PRAGMA table_info(datasets)`).all().some(
+    (column) => column.name === "updated_at"
+  );
+
+if (!hasUpdatedAt) {
+  console.log("Adding updated_at column to datasets table...");
+  db.prepare(`
+    ALTER TABLE datasets
+    ADD COLUMN updated_at DATETIME
+  `).run();
+  console.log("updated_at column added successfully");
+}
+
+/* =======================================================
+   TAXONOMY, TRANSFORM & APP ATTRIBUTE TABLES
+======================================================= */
+
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS taxonomies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'draft',
+    version INTEGER NOT NULL DEFAULT 1,
+    layers_json TEXT NOT NULL DEFAULT '[]',
+    sources_json TEXT NOT NULL DEFAULT '[]',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`).run();
+
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS taxonomy_mappings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    taxonomy_id INTEGER NOT NULL,
+    layer_index INTEGER NOT NULL,
+    source_dataset_id INTEGER NOT NULL,
+    source_field TEXT NOT NULL,
+    raw_value TEXT NOT NULL,
+    refined_value TEXT,
+    review_status TEXT NOT NULL DEFAULT 'unreviewed',
+    occurrence_count INTEGER NOT NULL DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(taxonomy_id, layer_index, source_dataset_id, source_field, raw_value),
+    FOREIGN KEY(taxonomy_id) REFERENCES taxonomies(id) ON DELETE CASCADE
+  )
+`).run();
+
+db.prepare(`
+  CREATE INDEX IF NOT EXISTS idx_taxonomy_mappings_taxonomy_id
+  ON taxonomy_mappings(taxonomy_id)
+`).run();
+
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS transform_functions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    function_type TEXT NOT NULL,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    output_dataset_id INTEGER,
+    output_attribute_name TEXT,
+    execution_status TEXT NOT NULL DEFAULT 'pending',
+    last_executed_at DATETIME,
+    taxonomy_version_at_execution INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`).run();
+
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS app_attributes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dataset_id INTEGER NOT NULL,
+    attribute_name TEXT NOT NULL,
+    transform_id INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(dataset_id, attribute_name)
+  )
+`).run();
+
+db.prepare(`
+  CREATE INDEX IF NOT EXISTS idx_app_attributes_dataset_id
+  ON app_attributes(dataset_id)
+`).run();
 
 /* =======================================================
    DATASET VIEW PREFERENCES API
@@ -1300,7 +1405,6 @@ app.post(
     }
   }
 );
-
 /* =======================================================
    REFRESH HELPERS
 ======================================================= */
@@ -1398,10 +1502,9 @@ function buildHeaderMismatchMessage(
     messages.push(
       `Missing column(s): ${comparison.missingColumns
         .slice(0, 10)
-        .join(", ")}${
-        comparison.missingColumns.length > 10
-          ? "..."
-          : ""
+        .join(", ")}${comparison.missingColumns.length > 10
+        ? "..."
+        : ""
       }.`
     );
   }
@@ -1413,10 +1516,9 @@ function buildHeaderMismatchMessage(
     messages.push(
       `Unexpected column(s): ${comparison.unexpectedColumns
         .slice(0, 10)
-        .join(", ")}${
-        comparison.unexpectedColumns.length > 10
-          ? "..."
-          : ""
+        .join(", ")}${comparison.unexpectedColumns.length > 10
+        ? "..."
+        : ""
       }.`
     );
   }
@@ -1424,6 +1526,304 @@ function buildHeaderMismatchMessage(
   return `The file headers do not match the dataset schema. ${messages.join(
     " "
   )}`;
+}
+
+/* =======================================================
+   REFRESH VALUE NORMALIZATION
+======================================================= */
+
+/*
+  Refresh files can contain list-valued columns in
+  different textual representations.
+
+  Examples:
+
+    ["Bat","Handle"]
+    ['Bat','Handle']
+    [Bat, Handle]
+    Bat, Handle
+    Bat
+
+  The original dataset schema is authoritative.
+
+  If a column is defined as a list in the stored schema,
+  its value is always converted to an actual JavaScript
+  array before the refreshed records are stored.
+
+  Duplicate list values (e.g. multiple identical failure
+  components on a complaint) are preserved to match the input
+  data as reflected during initial upload.
+
+  This prevents the same Tagged dataset from containing:
+
+    ["Bat", "Handle"]
+
+  in some records and:
+
+    "[\"Bat\", \"Handle\"]"
+
+  in others.
+*/
+
+function parseListValueForRefresh(
+  value
+) {
+
+  if (
+    Array.isArray(value)
+  ) {
+
+    return value
+      .flatMap(
+        (item) =>
+          parseListValueForRefresh(
+            item
+          )
+      )
+      .map(
+        (item) =>
+          String(item).trim()
+      )
+      .filter(
+        (item) =>
+          item !== ""
+      );
+  }
+
+  if (
+    value === undefined ||
+    value === null ||
+    value === ""
+  ) {
+
+    return [];
+  }
+
+  const text =
+    String(value).trim();
+
+  if (
+    text === ""
+  ) {
+
+    return [];
+  }
+
+  /* ---------------------------------------------------
+     JSON array
+  --------------------------------------------------- */
+
+  if (
+    text.startsWith("[") &&
+    text.endsWith("]")
+  ) {
+
+    try {
+
+      const parsed =
+        JSON.parse(text);
+
+      if (
+        Array.isArray(parsed)
+      ) {
+
+        return parsed
+          .flatMap(
+            (item) =>
+              parseListValueForRefresh(
+                item
+              )
+          )
+          .map(
+            (item) =>
+              String(item).trim()
+          )
+          .filter(
+            (item) =>
+              item !== ""
+          );
+      }
+
+    } catch {
+      /* Continue with Python-style parsing below. */
+    }
+
+    /* -------------------------------------------------
+       Python-style list
+
+       Example:
+
+         ['Bat', 'Handle']
+
+    ------------------------------------------------- */
+
+    const inner =
+      text
+        .slice(
+          1,
+          -1
+        )
+        .trim();
+
+    if (
+      inner === ""
+    ) {
+
+      return [];
+    }
+
+    const quotedMatches =
+      inner.match(
+        /'(?:\\'|[^'])*'|"(?:\\"|[^"])*"/g
+      );
+
+    if (
+      quotedMatches &&
+      quotedMatches.length > 0
+    ) {
+      return quotedMatches
+        .map(
+          (item) =>
+            item
+              .replace(
+                /^['"]|['"]$/g,
+                ""
+              )
+              .trim()
+        )
+        .filter(
+          (item) =>
+            item !== ""
+        );
+    }
+
+    return inner
+      .split(",")
+      .map(
+        (item) =>
+          item
+            .trim()
+            .replace(
+              /^['"]|['"]$/g,
+              ""
+            )
+            .trim()
+      )
+      .filter(
+        (item) =>
+          item !== ""
+      );
+  }
+
+  /* ---------------------------------------------------
+     Comma-separated list
+  --------------------------------------------------- */
+
+  if (
+    text.includes(",")
+  ) {
+
+    return text
+      .split(",")
+      .map(
+        (item) =>
+          item.trim()
+      )
+      .filter(
+        (item) =>
+          item !== ""
+      );
+  }
+
+  /* ---------------------------------------------------
+     Single list value
+  --------------------------------------------------- */
+
+  return [
+    text
+  ];
+}
+
+function isListSchemaColumn(
+  column
+) {
+
+  const type =
+    String(
+      column?.type || ""
+    )
+      .trim()
+      .toLowerCase();
+
+  return (
+    type === "list" ||
+    type.includes("array") ||
+    type.includes("list")
+  );
+}
+
+function normalizeRecordToSchema(
+  record,
+  schema
+) {
+
+  if (
+    !record ||
+    typeof record !== "object" ||
+    Array.isArray(record) ||
+    !Array.isArray(schema)
+  ) {
+
+    return record;
+  }
+
+  const normalized = {
+    ...record,
+  };
+
+  schema.forEach(
+    (column) => {
+
+      if (
+        !column?.name ||
+        column?.isAppAttribute ||
+        !isListSchemaColumn(
+          column
+        )
+      ) {
+
+        return;
+      }
+
+      normalized[column.name] =
+        parseListValueForRefresh(
+          normalized[column.name]
+        );
+    }
+  );
+
+  return normalized;
+}
+
+function normalizeRecordsToSchema(
+  records,
+  schema
+) {
+
+  if (
+    !Array.isArray(records)
+  ) {
+
+    return [];
+  }
+
+  return records.map(
+    (record) =>
+      normalizeRecordToSchema(
+        record,
+        schema
+      )
+  );
 }
 
 /* =======================================================
@@ -1586,32 +1986,76 @@ app.post(
       }
 
       /* -------------------------------------------------
-         HEADERS MUST MATCH
+         APP ATTRIBUTE COLUMNS
 
-         This is what replaces the schema definition
-         step on every subsequent load.
+         Generated fields are not part of the original
+         CSV schema. Refresh files must still match the
+         original custom attributes even when App
+         Attributes already exist on stored records.
+      ------------------------------------------------- */
+
+      const appAttrRows =
+        db.prepare(`
+          SELECT attribute_name, transform_id
+          FROM app_attributes
+          WHERE dataset_id = ?
+        `).all(dataset.id);
+
+      const appAttrNames = new Set(
+        appAttrRows.map((row) => row.attribute_name)
+      );
+
+      if (Array.isArray(schema)) {
+        schema.forEach((column) => {
+          if (column?.isAppAttribute && column.name) {
+            appAttrNames.add(column.name);
+          }
+        });
+      }
+
+      /* -------------------------------------------------
+         HEADERS AND SCHEMA EVOLUTION
+
+         Existing source columns must be present so an
+         update cannot accidentally erase data. Extra
+         CSV headers are accepted and added to the stored
+         schema; existing rows receive those new columns
+         through normalisation and incoming rows carry
+         their uploaded values.
+
+         App Attribute columns are ignored on both sides
+         because they are generated by transforms, not by
+         an uploaded CSV.
       ------------------------------------------------- */
 
       const existingHeaders =
         getDatasetHeaders(
           existingData,
           schema
+        ).filter(
+          (header) => !appAttrNames.has(header)
         );
 
       const incomingHeaders =
         getDatasetHeaders(
           data,
           null
+        ).filter(
+          (header) => !appAttrNames.has(header)
         );
 
-      const headerComparison =
-        compareHeaders(
-          existingHeaders,
-          incomingHeaders
+      const missingColumns =
+        existingHeaders.filter(
+          (header) => !incomingHeaders.includes(header)
+        );
+
+      const addedColumns =
+        incomingHeaders.filter(
+          (header) => !existingHeaders.includes(header)
         );
 
       if (
-        !headerComparison.matches
+        missingColumns.length > 0
       ) {
 
         return res.status(
@@ -1624,9 +2068,7 @@ app.post(
             "HEADER_MISMATCH",
 
           message:
-            buildHeaderMismatchMessage(
-              headerComparison
-            ),
+            `The upload is missing existing dataset column(s): ${missingColumns.join(", ")}. Include all existing source columns when updating this dataset.`,
 
           expectedHeaders:
             existingHeaders,
@@ -1635,13 +2077,56 @@ app.post(
             incomingHeaders,
 
           missingColumns:
-            headerComparison.missingColumns,
+            missingColumns,
 
           unexpectedColumns:
-            headerComparison.unexpectedColumns,
+            [],
 
         });
       }
+
+      const updatedSchema = Array.isArray(schema)
+        ? [...schema]
+        : [];
+
+      addedColumns.forEach((columnName) => {
+        const looksLikeList = data.some((row) => {
+          const value = row?.[columnName];
+          if (Array.isArray(value)) return true;
+          const text = String(value ?? "").trim();
+          return text.startsWith("[") && text.endsWith("]");
+        });
+
+        updatedSchema.push({
+          name: columnName,
+          type: looksLikeList ? "list" : "string",
+          ontologyMapping: "",
+          include: true,
+        });
+      });
+
+      /* -------------------------------------------------
+         NORMALIZE RECORDS TO THE STORED SCHEMA
+
+         The original schema remains authoritative. In
+         particular, list columns are converted back to
+         arrays before ID validation and merging. Existing
+         records are normalized as well so a previous
+         refresh cannot leave mixed list representations
+         in the dataset.
+      ------------------------------------------------- */
+
+      const normalizedExistingData =
+        normalizeRecordsToSchema(
+          existingData,
+          updatedSchema
+        );
+
+      const normalizedIncomingData =
+        normalizeRecordsToSchema(
+          data,
+          updatedSchema
+        );
 
       /* -------------------------------------------------
          _id COLUMN
@@ -1650,6 +2135,7 @@ app.post(
       const idColumnResult =
         getIdColumn(
           schema
+          
         );
 
       if (
@@ -1677,7 +2163,7 @@ app.post(
 
       const idValidation =
         validateDatasetIds(
-          data,
+          normalizedIncomingData,
           idColumn
         );
 
@@ -1824,7 +2310,7 @@ app.post(
         const missingTaggedIds =
           Array.from(
             new Set(
-              data
+              normalizedIncomingData
                 .map(
                   (row) =>
                     normalizeIdValue(
@@ -1882,10 +2368,14 @@ app.post(
          Existing records keep their position so the
          dataset order stays stable across refreshes.
          New records are appended in file order.
+
+         Derived App Attribute values are cleared for
+         updated and new records so they can be recomputed
+         after the source data changes.
       ------------------------------------------------- */
 
       const merged =
-        [...existingData];
+        [...normalizedExistingData];
 
       const indexById =
         new Map();
@@ -1913,7 +2403,7 @@ app.post(
       let added = 0;
       let updated = 0;
 
-      data.forEach(
+      normalizedIncomingData.forEach(
         (row) => {
 
           const normalizedId =
@@ -1941,14 +2431,34 @@ app.post(
               merged.length
             );
 
-            merged.push(row);
+            /* New record — no App Attribute values yet */
+            const newRow = { ...row };
+            appAttrNames.forEach(
+              (attr) => {
+                newRow[attr] = null;
+              }
+            );
+
+            merged.push(
+              newRow
+            );
 
             added += 1;
 
             return;
           }
 
-          merged[existingIndex] = row;
+          /* Updated source record — clear derived values. They may no longer
+             reflect incoming source values and must be recomputed. */
+          const updatedRow = { ...row };
+          appAttrNames.forEach(
+            (attr) => {
+              updatedRow[attr] = null;
+            }
+          );
+
+          merged[existingIndex] =
+            updatedRow;
 
           updated += 1;
         }
@@ -1987,6 +2497,11 @@ app.post(
           totalAfter:
             merged.length,
 
+          staleAppAttributes:
+            appAttrNames.size,
+
+          addedColumns,
+
         });
       }
 
@@ -2005,6 +2520,7 @@ app.post(
         UPDATE datasets
         SET
           data_json = ?,
+          schema_json = ?,
           size_kb = ?,
           ingestion_time_ms = ?,
           file_name = COALESCE(?, file_name),
@@ -2017,6 +2533,10 @@ app.post(
           merged
         ),
 
+        JSON.stringify(
+          updatedSchema
+        ),
+
         sizeKB,
 
         Date.now() - start,
@@ -2026,6 +2546,19 @@ app.post(
         dataset.id
 
       );
+
+      const transformIds = appAttrRows
+        .map((row) => Number(row.transform_id))
+        .filter((value) => Number.isInteger(value));
+
+      if (transformIds.length > 0) {
+        const placeholders = transformIds.map(() => "?").join(", ");
+        db.prepare(`
+          UPDATE transform_functions
+          SET execution_status = 'pending', updated_at = CURRENT_TIMESTAMP
+          WHERE id IN (${placeholders})
+        `).run(...transformIds);
+      }
 
       res.json({
 
@@ -2056,6 +2589,11 @@ app.post(
 
         totalAfter:
           merged.length,
+
+        staleAppAttributes:
+          appAttrNames.size,
+
+        addedColumns,
 
       });
 
@@ -3142,7 +3680,7 @@ function generateTimeline(
       const date =
         parseDateValue(
           row[
-            selectedDateColumn
+          selectedDateColumn
           ]
         );
 
@@ -3174,7 +3712,7 @@ function generateTimeline(
 
       let category =
         row[
-          selectedColorColumn
+        selectedColorColumn
         ];
 
       if (
@@ -3305,13 +3843,13 @@ app.get(
 
       const dateColumn =
         typeof req.query.dateColumn === "string" &&
-        req.query.dateColumn.trim() !== ""
+          req.query.dateColumn.trim() !== ""
           ? req.query.dateColumn.trim()
           : null;
 
       const colorBy =
         typeof req.query.colorBy === "string" &&
-        req.query.colorBy.trim() !== ""
+          req.query.colorBy.trim() !== ""
           ? req.query.colorBy.trim()
           : null;
 
@@ -3548,7 +4086,7 @@ function applyNumericFilter(
     );
 
   switch (
-    operator
+  operator
   ) {
 
     case "equals":
@@ -3597,13 +4135,13 @@ function applyNumericFilter(
 
       return (
         numericValue >=
-          Number(
-            filter.min
-          ) &&
+        Number(
+          filter.min
+        ) &&
         numericValue <=
-          Number(
-            filter.max
-          )
+        Number(
+          filter.max
+        )
       );
 
     default:
@@ -3634,15 +4172,15 @@ function applyDateFilter(
   const fromDate =
     filter.from
       ? parseDateValue(
-          filter.from
-        )
+        filter.from
+      )
       : null;
 
   const toDate =
     filter.to
       ? parseDateValue(
-          filter.to
-        )
+        filter.to
+      )
       : null;
 
   if (
@@ -4119,15 +4657,2032 @@ app.get(
 );
 
 /* =======================================================
-   SERVER
+   OLLAMA LLM TAGGING SERVICES
 ======================================================= */
 
-app.listen(
-  5000,
-  () => {
+const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
+const DEFAULT_TAGGING_BATCH_SIZE = Number(process.env.TAGGING_BATCH_SIZE) || 10;
 
+/* -------------------------------------------------------
+   DISCOVER OLLAMA MODELS
+------------------------------------------------------- */
+
+app.get("/ollama/models", async (req, res) => {
+  try {
+    const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`);
+
+    if (!response.ok) {
+      return res.status(502).json({
+        success: false,
+        message: `Ollama returned status ${response.status}`,
+        baseUrl: OLLAMA_BASE_URL,
+      });
+    }
+
+    const data = await response.json();
+    const models = Array.isArray(data.models)
+      ? data.models.map((m) => m.name || m.model)
+      : [];
+
+    return res.json({
+      success: true,
+      models,
+      baseUrl: OLLAMA_BASE_URL,
+    });
+  } catch (error) {
+    console.error("Ollama connection error:", error);
+    return res.status(503).json({
+      success: false,
+      message: `Unable to connect to Ollama at ${OLLAMA_BASE_URL}. Make sure Ollama is running locally and models are installed.`,
+      baseUrl: OLLAMA_BASE_URL,
+    });
+  }
+});
+
+/* -------------------------------------------------------
+   HELPER: EXTRACT ENTITIES FROM SINGLE RECORD
+------------------------------------------------------- */
+
+async function extractEntitiesWithOllama({
+  text,
+  entities,
+  prompt,
+  modelName,
+}) {
+  if (!text || !String(text).trim()) {
+    const emptyResult = {};
+    entities.forEach((entity) => {
+      emptyResult[entity] = [];
+    });
+    return {
+      status: "success",
+      extracted: emptyResult,
+      rawResponse: "Empty input text",
+    };
+  }
+
+  const systemInstructions = `You are an information extraction system.
+Extract the requested entities from the supplied free-text.
+Follow the user's extraction instructions strictly.
+Do not invent or infer information. Only use explicitly stated facts.
+Return ONLY valid JSON.
+For every entity requested, return an array of string values.
+If no value exists for an entity, return an empty array [].`;
+
+  const entityJsonTemplate = {};
+  entities.forEach((entity) => {
+    entityJsonTemplate[entity] = ["..."];
+  });
+
+  const fullPrompt = `${systemInstructions}
+
+USER INSTRUCTION:
+${prompt}
+
+ENTITIES TO EXTRACT:
+${entities.join(", ")}
+
+INPUT TEXT:
+"${String(text).trim()}"
+
+EXPECTED JSON FORMAT:
+${JSON.stringify(entityJsonTemplate, null, 2)}`;
+
+  try {
+    const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: modelName,
+        prompt: fullPrompt,
+        stream: false,
+        format: "json",
+      }),
+    });
+
+    if (!response.ok) {
+      return {
+        status: "failed",
+        error: `Ollama error HTTP ${response.status}`,
+        extracted: {},
+      };
+    }
+
+    const resData = await response.json();
+    const rawText = resData.response || "";
+
+    // Parse JSON output
+    let parsed = null;
+    try {
+      parsed = JSON.parse(rawText.trim());
+    } catch (e) {
+      // Defensive regex search for JSON inside response
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          parsed = JSON.parse(jsonMatch[0]);
+        } catch (_) { }
+      }
+    }
+
+    if (!parsed || typeof parsed !== "object") {
+      return {
+        status: "failed",
+        error: "LLM returned an invalid structured JSON response.",
+        rawResponse: rawText,
+        extracted: {},
+      };
+    }
+
+    // Normalize extracted values to array of strings per entity
+    const normalized = {};
+    entities.forEach((entity) => {
+      const val = parsed[entity] ?? parsed[entity.toLowerCase()] ?? [];
+      if (Array.isArray(val)) {
+        normalized[entity] = val
+          .map((v) => String(v).trim())
+          .filter(Boolean);
+      } else if (val !== null && val !== undefined && val !== "") {
+        normalized[entity] = [String(val).trim()];
+      } else {
+        normalized[entity] = [];
+      }
+    });
+
+    return {
+      status: "success",
+      extracted: normalized,
+      rawResponse: rawText,
+    };
+  } catch (err) {
+    return {
+      status: "failed",
+      error: err.message || "Network error calling Ollama",
+      extracted: {},
+    };
+  }
+}
+
+/* -------------------------------------------------------
+   TAG PREVIEW (SAMPLE SIZE)
+------------------------------------------------------- */
+
+app.post("/ollama/tag-preview", async (req, res) => {
+  try {
+    const { datasetId, freeTextColumn, entities, prompt, sampleSize = 50, modelName } = req.body;
+
+    if (!datasetId || !freeTextColumn || !Array.isArray(entities) || entities.length === 0 || !prompt || !modelName) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing required parameters: datasetId, freeTextColumn, entities, prompt, modelName",
+      });
+    }
+
+    const dataset = db.prepare(`SELECT data_json FROM datasets WHERE id = ?`).get(Number(datasetId));
+    if (!dataset) {
+      return res.status(404).json({ success: false, message: "Dataset not found" });
+    }
+
+    const records = JSON.parse(dataset.data_json || "[]");
+    const countToTake = Math.min(Number(sampleSize) || 50, records.length);
+    const sampleRecords = records.slice(0, countToTake);
+
+    const results = [];
+    for (let i = 0; i < sampleRecords.length; i++) {
+      const rec = sampleRecords[i];
+      const textVal = rec[freeTextColumn] || "";
+
+      const extraction = await extractEntitiesWithOllama({
+        text: textVal,
+        entities,
+        prompt,
+        modelName,
+      });
+
+      results.push({
+        index: i + 1,
+        id: rec._id ?? rec.id ?? rec.eventId ?? i + 1,
+        freeText: textVal,
+        extracted: extraction.extracted,
+        status: extraction.status,
+        error: extraction.error,
+      });
+    }
+
+    return res.json({
+      success: true,
+      results,
+      totalDatasetRows: records.length,
+      sampleSize: sampleRecords.length,
+    });
+  } catch (error) {
+    console.error("Tag preview error:", error);
+    return res.status(500).json({ success: false, message: "Failed to generate preview" });
+  }
+});
+
+/* -------------------------------------------------------
+   TAG ENTIRE DATASET (BATCHED)
+------------------------------------------------------- */
+
+app.post("/ollama/tag-dataset", async (req, res) => {
+  try {
+    const { datasetId, freeTextColumn, entities, prompt, modelName, batchSize } = req.body;
+
+    if (!datasetId || !freeTextColumn || !Array.isArray(entities) || entities.length === 0 || !prompt || !modelName) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing required parameters",
+      });
+    }
+
+    const dataset = db.prepare(`SELECT data_json FROM datasets WHERE id = ?`).get(Number(datasetId));
+    if (!dataset) {
+      return res.status(404).json({ success: false, message: "Dataset not found" });
+    }
+
+    const records = JSON.parse(dataset.data_json || "[]");
+    const bSize = Number(batchSize) || DEFAULT_TAGGING_BATCH_SIZE;
+
+    let processedCount = 0;
+    let successCount = 0;
+    let failedCount = 0;
+
+    const enrichedRecords = [];
+
+    for (let i = 0; i < records.length; i += bSize) {
+      const batch = records.slice(i, i + bSize);
+
+      const batchPromises = batch.map(async (record) => {
+        const textVal = record[freeTextColumn] || "";
+        const extraction = await extractEntitiesWithOllama({
+          text: textVal,
+          entities,
+          prompt,
+          modelName,
+        });
+
+        const newRec = { ...record };
+        if (extraction.status === "success") {
+          successCount++;
+          entities.forEach((entity) => {
+            newRec[entity] = extraction.extracted[entity] || [];
+          });
+          newRec._taggingStatus = "success";
+        } else {
+          failedCount++;
+          entities.forEach((entity) => {
+            newRec[entity] = [];
+          });
+          newRec._taggingStatus = "failed";
+          newRec._taggingError = extraction.error;
+        }
+
+        return newRec;
+      });
+
+      const batchResults = await Promise.all(batchPromises);
+      enrichedRecords.push(...batchResults);
+      processedCount += batch.length;
+    }
+
+    return res.json({
+      success: true,
+      records: enrichedRecords,
+      totalCount: records.length,
+      processedCount,
+      successCount,
+      failedCount,
+    });
+  } catch (error) {
+    console.error("Tag dataset error:", error);
+    return res.status(500).json({ success: false, message: "Failed to process dataset" });
+  }
+});
+
+/* -------------------------------------------------------
+   SAVE TAGGED DATASET TO DB
+------------------------------------------------------- */
+
+app.post("/ollama/save-tagged-dataset", (req, res) => {
+  try {
+    const { parentDatasetId, datasetName, records, entities } = req.body;
+
+    if (!parentDatasetId || !datasetName || !Array.isArray(records) || !Array.isArray(entities)) {
+      return res.status(400).json({ success: false, message: "Invalid payload for saving tagged dataset" });
+    }
+
+    // Get parent dataset schema
+    const parent = db.prepare(`SELECT schema_json, file_name FROM datasets WHERE id = ?`).get(Number(parentDatasetId));
+    if (!parent) {
+      return res.status(404).json({ success: false, message: "Parent dataset not found" });
+    }
+
+    const parentSchema = JSON.parse(parent.schema_json || "[]");
+
+    // Construct schema with new list columns for entities
+    const entityColumns = entities.map((entity) => ({
+      name: entity,
+      type: "list",
+      ontologyMapping: "",
+    }));
+
+    const fullSchema = [...parentSchema, ...entityColumns];
+
+    const result = db
+      .prepare(`
+        INSERT INTO datasets (
+          file_name,
+          dataset_name,
+          data_type,
+          parent_dataset_id,
+          status,
+          size_kb,
+          ingestion_time_ms,
+          schema_json,
+          data_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        parent.file_name || `${datasetName}.csv`,
+        datasetName,
+        "tagged",
+        Number(parentDatasetId),
+        "completed",
+        Math.round(JSON.stringify(records).length / 1024),
+        0,
+        JSON.stringify(fullSchema),
+        JSON.stringify(records)
+      );
+
+    return res.json({
+      success: true,
+      datasetId: result.lastInsertRowid,
+      datasetName,
+    });
+  } catch (error) {
+    console.error("Save tagged dataset error:", error);
+    return res.status(500).json({ success: false, message: "Failed to save tagged dataset" });
+  }
+});
+
+/* =======================================================
+   TAXONOMY CRUD
+======================================================= */
+
+/* List all taxonomies */
+app.get("/taxonomies", (req, res) => {
+  try {
+    const rows = db.prepare(`
+      SELECT t.id, t.name, t.description, t.status, t.version,
+             t.layers_json, t.sources_json, t.created_at, t.updated_at,
+             (SELECT COUNT(*) FROM taxonomy_mappings m WHERE m.taxonomy_id = t.id) AS mapping_count,
+             (SELECT COUNT(*) FROM taxonomy_mappings m WHERE m.taxonomy_id = t.id AND review_status = 'reviewed') AS reviewed_count,
+             (SELECT COUNT(*) FROM taxonomy_mappings m WHERE m.taxonomy_id = t.id AND (review_status = 'unmapped' OR refined_value IS NULL OR TRIM(refined_value) = '')) AS unmapped_count
+      FROM taxonomies t
+      ORDER BY t.updated_at DESC
+    `).all();
+
+    const taxonomies = rows.map((row) => ({
+      ...row,
+      layers: JSON.parse(row.layers_json || "[]"),
+      sources: JSON.parse(row.sources_json || "[]"),
+      mappingCount: row.mapping_count,
+      reviewedCount: row.reviewed_count,
+      unmappedCount: row.unmapped_count,
+    }));
+
+    return res.json({ success: true, taxonomies });
+  } catch (error) {
+    console.error("List taxonomies error:", error);
+    return res.status(500).json({ success: false, message: "Failed to list taxonomies" });
+  }
+});
+
+/* Create taxonomy */
+app.post("/taxonomies", (req, res) => {
+  try {
+    const { name, description, layers, sources } = req.body;
+
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ success: false, message: "Taxonomy name is required" });
+    }
+
+    const trimmedName = String(name).trim();
+
+    const existing = db.prepare(
+      "SELECT id FROM taxonomies WHERE name = ?"
+    ).get(trimmedName);
+
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        message: `A taxonomy named "${trimmedName}" already exists`,
+      });
+    }
+
+    const result = db.prepare(`
+      INSERT INTO taxonomies (name, description, layers_json, sources_json, status, version)
+      VALUES (?, ?, ?, ?, 'draft', 1)
+    `).run(
+      trimmedName,
+      String(description || "").trim() || null,
+      JSON.stringify(Array.isArray(layers) ? layers : []),
+      JSON.stringify(Array.isArray(sources) ? sources : [])
+    );
+
+    const created = db.prepare(
+      "SELECT * FROM taxonomies WHERE id = ?"
+    ).get(result.lastInsertRowid);
+
+    return res.json({
+      success: true,
+      taxonomy: {
+        ...created,
+        layers: JSON.parse(created.layers_json || "[]"),
+        sources: JSON.parse(created.sources_json || "[]"),
+      },
+    });
+  } catch (error) {
+    console.error("Create taxonomy error:", error);
+    return res.status(500).json({ success: false, message: "Failed to create taxonomy" });
+  }
+});
+
+/* Get single taxonomy */
+app.get("/taxonomies/:id", (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ success: false, message: "Invalid taxonomy id" });
+    }
+
+    const row = db.prepare(
+      "SELECT * FROM taxonomies WHERE id = ?"
+    ).get(id);
+
+    if (!row) {
+      return res.status(404).json({ success: false, message: "Taxonomy not found" });
+    }
+
+    const mappings = db.prepare(`
+      SELECT id, layer_index, source_dataset_id, source_field,
+             raw_value, refined_value, review_status, occurrence_count
+      FROM taxonomy_mappings
+      WHERE taxonomy_id = ?
+      ORDER BY layer_index, source_dataset_id, source_field, raw_value
+    `).all(id);
+
+    return res.json({
+      success: true,
+      taxonomy: {
+        ...row,
+        layers: JSON.parse(row.layers_json || "[]"),
+        sources: JSON.parse(row.sources_json || "[]"),
+      },
+      mappings,
+    });
+  } catch (error) {
+    console.error("Get taxonomy error:", error);
+    return res.status(500).json({ success: false, message: "Failed to get taxonomy" });
+  }
+});
+
+/* Update taxonomy */
+app.put("/taxonomies/:id", (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ success: false, message: "Invalid taxonomy id" });
+    }
+
+    const existing = db.prepare(
+      "SELECT * FROM taxonomies WHERE id = ?"
+    ).get(id);
+
+    if (!existing) {
+      return res.status(404).json({ success: false, message: "Taxonomy not found" });
+    }
+
+    const { name, description, layers, sources, status } = req.body;
+
+    const updatedName = name ? String(name).trim() : existing.name;
+    if (!updatedName) {
+      return res.status(400).json({ success: false, message: "Taxonomy name cannot be empty" });
+    }
+
+    /* Check name uniqueness if changed */
+    if (updatedName !== existing.name) {
+      const nameConflict = db.prepare(
+        "SELECT id FROM taxonomies WHERE name = ? AND id != ?"
+      ).get(updatedName, id);
+      if (nameConflict) {
+        return res.status(409).json({
+          success: false,
+          message: `A taxonomy named "${updatedName}" already exists`,
+        });
+      }
+    }
+
+    const validStatuses = ["draft", "complete"];
+    const updatedStatus = validStatuses.includes(status) ? status : existing.status;
+
+    db.prepare(`
+      UPDATE taxonomies
+      SET name = ?,
+          description = ?,
+          layers_json = ?,
+          sources_json = ?,
+          status = ?,
+          version = version + 1,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(
+      updatedName,
+      description != null ? String(description).trim() || null : existing.description,
+      JSON.stringify(Array.isArray(layers) ? layers : JSON.parse(existing.layers_json || "[]")),
+      JSON.stringify(Array.isArray(sources) ? sources : JSON.parse(existing.sources_json || "[]")),
+      updatedStatus,
+      id
+    );
+
+    const updated = db.prepare(
+      "SELECT * FROM taxonomies WHERE id = ?"
+    ).get(id);
+
+    return res.json({
+      success: true,
+      taxonomy: {
+        ...updated,
+        layers: JSON.parse(updated.layers_json || "[]"),
+        sources: JSON.parse(updated.sources_json || "[]"),
+      },
+    });
+  } catch (error) {
+    console.error("Update taxonomy error:", error);
+    return res.status(500).json({ success: false, message: "Failed to update taxonomy" });
+  }
+});
+
+/* Delete taxonomy */
+app.delete("/taxonomies/:id", (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ success: false, message: "Invalid taxonomy id" });
+    }
+
+    const existing = db.prepare(
+      "SELECT id FROM taxonomies WHERE id = ?"
+    ).get(id);
+
+    if (!existing) {
+      return res.status(404).json({ success: false, message: "Taxonomy not found" });
+    }
+
+    /* Dependency check: any transforms using this taxonomy? */
+    const dependentTransforms = db.prepare(`
+      SELECT id, name FROM transform_functions
+      WHERE json_extract(config_json, '$.taxonomyId') = ?
+    `).all(id);
+
+    if (dependentTransforms.length > 0) {
+      const names = dependentTransforms.map((t) => t.name).slice(0, 5).join(", ");
+      return res.status(409).json({
+        success: false,
+        message: `Cannot delete: taxonomy is used by transform(s): ${names}`,
+        dependentTransforms,
+      });
+    }
+
+    const deleteTaxonomy = db.transaction(() => {
+      db.prepare("DELETE FROM taxonomy_mappings WHERE taxonomy_id = ?").run(id);
+      db.prepare("DELETE FROM taxonomies WHERE id = ?").run(id);
+    });
+
+    deleteTaxonomy();
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("Delete taxonomy error:", error);
+    return res.status(500).json({ success: false, message: "Failed to delete taxonomy" });
+  }
+});
+
+/* Duplicate taxonomy (config + mappings) */
+app.post("/taxonomies/:id/duplicate", (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ success: false, message: "Invalid taxonomy id" });
+    }
+
+    const existing = db.prepare("SELECT * FROM taxonomies WHERE id = ?").get(id);
+    if (!existing) {
+      return res.status(404).json({ success: false, message: "Taxonomy not found" });
+    }
+
+    const requestedName = req.body?.name ? String(req.body.name).trim() : "";
+    let copyName = requestedName || `${existing.name} (copy)`;
+    let suffix = 2;
+    while (db.prepare("SELECT id FROM taxonomies WHERE name = ?").get(copyName)) {
+      copyName = `${existing.name} (copy ${suffix})`;
+      suffix += 1;
+    }
+
+    const duplicate = db.transaction(() => {
+      const created = db.prepare(`
+        INSERT INTO taxonomies (name, description, layers_json, sources_json, status, version)
+        VALUES (?, ?, ?, ?, 'draft', 1)
+      `).run(
+        copyName,
+        existing.description,
+        existing.layers_json,
+        existing.sources_json
+      );
+
+      const newId = created.lastInsertRowid;
+      const mappings = db.prepare(`
+        SELECT layer_index, source_dataset_id, source_field,
+               raw_value, refined_value, review_status, occurrence_count
+        FROM taxonomy_mappings
+        WHERE taxonomy_id = ?
+      `).all(id);
+
+      const insertMapping = db.prepare(`
+        INSERT INTO taxonomy_mappings (
+          taxonomy_id, layer_index, source_dataset_id, source_field,
+          raw_value, refined_value, review_status, occurrence_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      for (const mapping of mappings) {
+        insertMapping.run(
+          newId,
+          mapping.layer_index,
+          mapping.source_dataset_id,
+          mapping.source_field,
+          mapping.raw_value,
+          mapping.refined_value,
+          mapping.review_status,
+          mapping.occurrence_count
+        );
+      }
+
+      return db.prepare("SELECT * FROM taxonomies WHERE id = ?").get(newId);
+    });
+
+    const created = duplicate();
+
+    return res.json({
+      success: true,
+      taxonomy: {
+        ...created,
+        layers: JSON.parse(created.layers_json || "[]"),
+        sources: JSON.parse(created.sources_json || "[]"),
+      },
+    });
+  } catch (error) {
+    console.error("Duplicate taxonomy error:", error);
+    return res.status(500).json({ success: false, message: "Failed to duplicate taxonomy" });
+  }
+});
+
+/* =======================================================
+   TAXONOMY — EXTRACT UNIQUE ENTITIES
+======================================================= */
+
+app.post("/taxonomies/:id/extract", (req, res) => {
+  try {
+    const taxonomyId = Number(req.params.id);
+    if (!Number.isInteger(taxonomyId)) {
+      return res.status(400).json({ success: false, message: "Invalid taxonomy id" });
+    }
+
+    const taxonomy = db.prepare(
+      "SELECT * FROM taxonomies WHERE id = ?"
+    ).get(taxonomyId);
+
+    if (!taxonomy) {
+      return res.status(404).json({ success: false, message: "Taxonomy not found" });
+    }
+
+    const layers = JSON.parse(taxonomy.layers_json || "[]");
+    const sources = JSON.parse(taxonomy.sources_json || "[]");
+
+    if (!Array.isArray(sources) || sources.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No source datasets/fields configured on this taxonomy",
+      });
+    }
+
+    if (!Array.isArray(layers) || layers.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No layers configured on this taxonomy. Configure layers before extracting.",
+      });
+    }
+
+    const insertMapping = db.prepare(`
+      INSERT INTO taxonomy_mappings (
+        taxonomy_id, layer_index, source_dataset_id, source_field,
+        raw_value, refined_value, review_status, occurrence_count
+      ) VALUES (?, ?, ?, ?, ?, ?, 'unreviewed', ?)
+      ON CONFLICT(taxonomy_id, layer_index, source_dataset_id, source_field, raw_value)
+      DO UPDATE SET
+        occurrence_count = excluded.occurrence_count,
+        updated_at = CURRENT_TIMESTAMP
+    `);
+
+    let totalExtracted = 0;
+    let totalNew = 0;
+    const errors = [];
+
+    const extractEntities = db.transaction(() => {
+      for (const source of sources) {
+        const { datasetId, fieldName, layerIndex } = source;
+
+        if (
+          datasetId == null ||
+          !fieldName ||
+          layerIndex == null
+        ) {
+          errors.push(`Invalid source configuration: ${JSON.stringify(source)}`);
+          continue;
+        }
+
+        const layer = layers[layerIndex];
+        if (!layer) {
+          errors.push(`Layer index ${layerIndex} does not exist`);
+          continue;
+        }
+
+        const dataset = db.prepare(
+          "SELECT schema_json, data_json FROM datasets WHERE id = ?"
+        ).get(Number(datasetId));
+
+        if (!dataset) {
+          errors.push(`Dataset ${datasetId} not found`);
+          continue;
+        }
+
+        let records = [];
+        try {
+          records = JSON.parse(dataset.data_json || "[]");
+        } catch {
+          errors.push(`Dataset ${datasetId} has invalid data`);
+          continue;
+        }
+
+        const parseRule = source.parseRule || layer.parseRule || null;
+        const valueCounts = new Map();
+
+        for (const record of records) {
+          const expanded = expandRawValues(record[fieldName]);
+          for (const expandedValue of expanded) {
+            const parsedValues = applyParseRule(expandedValue, parseRule);
+            for (const value of parsedValues) {
+              valueCounts.set(value, (valueCounts.get(value) || 0) + 1);
+            }
+          }
+        }
+
+        totalExtracted += valueCounts.size;
+
+        for (const [rawValue, count] of valueCounts.entries()) {
+          /* Check if this is a new mapping */
+          const existingMapping = db.prepare(`
+            SELECT id FROM taxonomy_mappings
+            WHERE taxonomy_id = ? AND layer_index = ?
+              AND source_dataset_id = ? AND source_field = ? AND raw_value = ?
+          `).get(taxonomyId, layerIndex, Number(datasetId), fieldName, rawValue);
+
+          if (!existingMapping) {
+            totalNew += 1;
+          }
+
+          insertMapping.run(
+            taxonomyId,
+            layerIndex,
+            Number(datasetId),
+            fieldName,
+            rawValue,
+            rawValue, /* Default refined = same as raw */
+            count
+          );
+        }
+      }
+
+      layers.forEach((layer, layerIndex) => {
+        if (!layer || layer.origin !== "derived") {
+          return;
+        }
+
+        const parentIndex = Number(layer.derivedFromLayerIndex);
+        if (!Number.isInteger(parentIndex) || parentIndex < 0 || parentIndex >= layers.length) {
+          errors.push(`Derived layer ${layerIndex} has an invalid parent layer`);
+          return;
+        }
+
+        const parentMappings = db.prepare(`
+          SELECT source_dataset_id, source_field, raw_value, refined_value, occurrence_count
+          FROM taxonomy_mappings
+          WHERE taxonomy_id = ? AND layer_index = ?
+        `).all(taxonomyId, parentIndex);
+
+        const valueCounts = new Map();
+        for (const parent of parentMappings) {
+          const derivedValue = String(parent.refined_value ?? parent.raw_value ?? "").trim();
+          if (!derivedValue) {
+            continue;
+          }
+
+          const key = `${parent.source_dataset_id}\0${parent.source_field}\0${derivedValue}`;
+          const current = valueCounts.get(key) || {
+            datasetId: parent.source_dataset_id,
+            fieldName: parent.source_field,
+            rawValue: derivedValue,
+            count: 0,
+          };
+          current.count += parent.occurrence_count || 1;
+          valueCounts.set(key, current);
+        }
+
+        totalExtracted += valueCounts.size;
+
+        for (const item of valueCounts.values()) {
+          const existingMapping = db.prepare(`
+            SELECT id FROM taxonomy_mappings
+            WHERE taxonomy_id = ? AND layer_index = ?
+              AND source_dataset_id = ? AND source_field = ? AND raw_value = ?
+          `).get(taxonomyId, layerIndex, Number(item.datasetId), item.fieldName, item.rawValue);
+
+          if (!existingMapping) {
+            totalNew += 1;
+          }
+
+          insertMapping.run(
+            taxonomyId,
+            layerIndex,
+            Number(item.datasetId),
+            item.fieldName,
+            item.rawValue,
+            item.rawValue,
+            item.count
+          );
+        }
+      });
+    });
+
+    extractEntities();
+
+    /* Update taxonomy timestamp */
+    db.prepare(
+      "UPDATE taxonomies SET updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+    ).run(taxonomyId);
+
+    const totalMappings = db.prepare(
+      "SELECT COUNT(*) as cnt FROM taxonomy_mappings WHERE taxonomy_id = ?"
+    ).get(taxonomyId);
+
+    const reviewed = db.prepare(
+      "SELECT COUNT(*) as cnt FROM taxonomy_mappings WHERE taxonomy_id = ? AND review_status = 'reviewed'"
+    ).get(taxonomyId);
+
+    return res.json({
+      success: true,
+      totalExtracted,
+      newEntities: totalNew,
+      totalMappings: totalMappings.cnt,
+      reviewed: reviewed.cnt,
+      errors: errors.length > 0 ? errors : undefined,
+    });
+  } catch (error) {
+    console.error("Extract entities error:", error);
+    return res.status(500).json({ success: false, message: "Failed to extract entities" });
+  }
+});
+
+/* =======================================================
+   TAXONOMY — MAPPINGS (bulk upsert)
+======================================================= */
+
+app.get("/taxonomies/:id/mappings", (req, res) => {
+  try {
+    const taxonomyId = Number(req.params.id);
+    if (!Number.isInteger(taxonomyId)) {
+      return res.status(400).json({ success: false, message: "Invalid taxonomy id" });
+    }
+
+    const taxonomy = db.prepare(
+      "SELECT id FROM taxonomies WHERE id = ?"
+    ).get(taxonomyId);
+
+    if (!taxonomy) {
+      return res.status(404).json({ success: false, message: "Taxonomy not found" });
+    }
+
+    const search = req.query.search
+      ? String(req.query.search).trim()
+      : "";
+
+    const statusFilter = req.query.status
+      ? String(req.query.status).trim()
+      : "";
+
+    const layerFilter = req.query.layerIndex != null
+      ? Number(req.query.layerIndex)
+      : null;
+
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const pageSize = Math.min(500, Math.max(10, Number(req.query.pageSize) || 100));
+    const offset = (page - 1) * pageSize;
+
+    let where = "WHERE taxonomy_id = ?";
+    const params = [taxonomyId];
+
+    if (search) {
+      where += " AND (raw_value LIKE ? OR refined_value LIKE ?)";
+      params.push(`%${search}%`, `%${search}%`);
+    }
+
+    if (statusFilter) {
+      where += " AND review_status = ?";
+      params.push(statusFilter);
+    }
+
+    if (layerFilter !== null && !Number.isNaN(layerFilter)) {
+      where += " AND layer_index = ?";
+      params.push(layerFilter);
+    }
+
+    const totalRow = db.prepare(
+      `SELECT COUNT(*) as cnt FROM taxonomy_mappings ${where}`
+    ).get(...params);
+
+    const mappings = db.prepare(
+      `SELECT id, layer_index, source_dataset_id, source_field,
+              raw_value, refined_value, review_status, occurrence_count
+       FROM taxonomy_mappings ${where}
+       ORDER BY layer_index, source_dataset_id, source_field, raw_value
+       LIMIT ? OFFSET ?`
+    ).all(...params, pageSize, offset);
+
+    const stats = db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN review_status = 'reviewed' THEN 1 ELSE 0 END) AS reviewed,
+        SUM(CASE WHEN review_status = 'unreviewed' THEN 1 ELSE 0 END) AS unreviewed,
+        SUM(CASE WHEN review_status = 'unmapped' OR refined_value IS NULL OR TRIM(COALESCE(refined_value, '')) = '' THEN 1 ELSE 0 END) AS unmapped
+      FROM taxonomy_mappings
+      WHERE taxonomy_id = ?
+    `).get(taxonomyId);
+
+    return res.json({
+      success: true,
+      mappings,
+      total: totalRow.cnt,
+      page,
+      pageSize,
+      stats,
+    });
+  } catch (error) {
+    console.error("Get mappings error:", error);
+    return res.status(500).json({ success: false, message: "Failed to get mappings" });
+  }
+});
+
+app.put("/taxonomies/:id/mappings", (req, res) => {
+  try {
+    const taxonomyId = Number(req.params.id);
+    if (!Number.isInteger(taxonomyId)) {
+      return res.status(400).json({ success: false, message: "Invalid taxonomy id" });
+    }
+
+    const taxonomy = db.prepare(
+      "SELECT id FROM taxonomies WHERE id = ?"
+    ).get(taxonomyId);
+
+    if (!taxonomy) {
+      return res.status(404).json({ success: false, message: "Taxonomy not found" });
+    }
+
+    const { mappings } = req.body;
+
+    if (!Array.isArray(mappings)) {
+      return res.status(400).json({ success: false, message: "mappings must be an array" });
+    }
+
+    const updateMapping = db.prepare(`
+      UPDATE taxonomy_mappings
+      SET refined_value = ?,
+          review_status = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND taxonomy_id = ?
+    `);
+
+    const bulkUpdate = db.transaction(() => {
+      let updatedCount = 0;
+      for (const mapping of mappings) {
+        const { id, refinedValue, reviewStatus } = mapping;
+        if (!id) continue;
+
+        const validStatuses = ["unreviewed", "reviewed", "unmapped"];
+        const status = validStatuses.includes(reviewStatus) ? reviewStatus : "reviewed";
+
+        const result = updateMapping.run(
+          refinedValue != null ? String(refinedValue) : null,
+          status,
+          Number(id),
+          taxonomyId
+        );
+        updatedCount += result.changes;
+      }
+      return updatedCount;
+    });
+
+    const updatedCount = bulkUpdate();
+
+    /* Update taxonomy version to signal transforms may be stale */
+    db.prepare(`
+      UPDATE taxonomies
+      SET version = version + 1, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(taxonomyId);
+
+    return res.json({ success: true, updatedCount });
+  } catch (error) {
+    console.error("Update mappings error:", error);
+    return res.status(500).json({ success: false, message: "Failed to update mappings" });
+  }
+});
+
+/* =======================================================
+   TAXONOMY — COMPLETE (validate & mark complete)
+======================================================= */
+
+app.post("/taxonomies/:id/complete", (req, res) => {
+  try {
+    const taxonomyId = Number(req.params.id);
+    if (!Number.isInteger(taxonomyId)) {
+      return res.status(400).json({ success: false, message: "Invalid taxonomy id" });
+    }
+
+    const taxonomy = db.prepare(
+      "SELECT * FROM taxonomies WHERE id = ?"
+    ).get(taxonomyId);
+
+    if (!taxonomy) {
+      return res.status(404).json({ success: false, message: "Taxonomy not found" });
+    }
+
+    const layers = JSON.parse(taxonomy.layers_json || "[]");
+    const sources = JSON.parse(taxonomy.sources_json || "[]");
+
+    const validationErrors = [];
+
+    if (!taxonomy.name || !taxonomy.name.trim()) {
+      validationErrors.push("Taxonomy name is required");
+    }
+
+    if (layers.length === 0) {
+      validationErrors.push("At least one layer must be configured");
+    }
+
+    if (sources.length === 0) {
+      validationErrors.push("At least one source must be configured");
+    }
+
+    const totalMappings = db.prepare(
+      "SELECT COUNT(*) as cnt FROM taxonomy_mappings WHERE taxonomy_id = ?"
+    ).get(taxonomyId);
+
+    const unreviewedCount = db.prepare(
+      "SELECT COUNT(*) as cnt FROM taxonomy_mappings WHERE taxonomy_id = ? AND review_status = 'unreviewed'"
+    ).get(taxonomyId);
+
+    if (totalMappings.cnt === 0) {
+      validationErrors.push("No entities have been extracted. Run extraction first.");
+    }
+
+    const unmappedCount = db.prepare(`
+      SELECT COUNT(*) as cnt
+      FROM taxonomy_mappings
+      WHERE taxonomy_id = ?
+        AND (review_status = 'unmapped' OR refined_value IS NULL OR TRIM(refined_value) = '')
+    `).get(taxonomyId);
+
+    if (unmappedCount.cnt > 0) {
+      validationErrors.push(
+        `${unmappedCount.cnt} entit${unmappedCount.cnt === 1 ? "y is" : "ies are"} unmapped. Map them or save as a draft.`
+      );
+    }
+
+    const sourceLayers = layers.filter((layer) => !layer.origin || layer.origin === "source");
+    if (sourceLayers.length > 0 && sources.length === 0) {
+      validationErrors.push("At least one source must be configured");
+    }
+
+    if (validationErrors.length > 0) {
+      return res.status(422).json({
+        success: false,
+        message: "Taxonomy validation failed",
+        errors: validationErrors,
+        unreviewedCount: unreviewedCount.cnt,
+        totalMappings: totalMappings.cnt,
+      });
+    }
+
+    db.prepare(`
+      UPDATE taxonomies
+      SET status = 'complete', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(taxonomyId);
+
+    return res.json({
+      success: true,
+      unreviewedCount: unreviewedCount.cnt,
+      totalMappings: totalMappings.cnt,
+    });
+  } catch (error) {
+    console.error("Complete taxonomy error:", error);
+    return res.status(500).json({ success: false, message: "Failed to complete taxonomy" });
+  }
+});
+
+/* =======================================================
+   TRANSFORM FUNCTIONS CRUD
+======================================================= */
+
+app.get("/transforms", (req, res) => {
+  try {
+    const rows = db.prepare(`
+      SELECT id, name, description, function_type, config_json,
+             output_dataset_id, output_attribute_name,
+             execution_status, last_executed_at, taxonomy_version_at_execution,
+             created_at, updated_at
+      FROM transform_functions
+      ORDER BY updated_at DESC
+    `).all();
+
+    const transforms = rows.map((row) => ({
+      ...row,
+      config: JSON.parse(row.config_json || "{}"),
+    }));
+
+    return res.json({ success: true, transforms });
+  } catch (error) {
+    console.error("List transforms error:", error);
+    return res.status(500).json({ success: false, message: "Failed to list transforms" });
+  }
+});
+
+app.post("/transforms", (req, res) => {
+  try {
+    const { name, description, functionType, config, outputDatasetId, outputAttributeName } = req.body;
+
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ success: false, message: "Transform name is required" });
+    }
+
+    const validTypes = ["string_mapper", "column_combiner"];
+    if (!validTypes.includes(functionType)) {
+      return res.status(400).json({
+        success: false,
+        message: `functionType must be one of: ${validTypes.join(", ")}`,
+      });
+    }
+
+    if (!outputDatasetId) {
+      return res.status(400).json({ success: false, message: "outputDatasetId is required" });
+    }
+
+    if (!outputAttributeName || !String(outputAttributeName).trim()) {
+      return res.status(400).json({ success: false, message: "outputAttributeName is required" });
+    }
+
+    const normalizedConfig = { ...(config || {}) };
+    if (functionType === "string_mapper" && !normalizedConfig.unmappedPolicy) {
+      normalizedConfig.unmappedPolicy = "keep_raw";
+    }
+    if (functionType === "column_combiner" && normalizedConfig.separator == null) {
+      normalizedConfig.separator = " - ";
+    }
+
+    const validationError = validateTransformConfig(
+      functionType,
+      normalizedConfig,
+      outputDatasetId,
+      outputAttributeName,
+      null
+    );
+
+    if (validationError) {
+      return res.status(400).json({ success: false, message: validationError });
+    }
+
+    const result = db.prepare(`
+      INSERT INTO transform_functions (
+        name, description, function_type, config_json,
+        output_dataset_id, output_attribute_name, execution_status
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending')
+    `).run(
+      String(name).trim(),
+      String(description || "").trim() || null,
+      functionType,
+      JSON.stringify(normalizedConfig),
+      Number(outputDatasetId),
+      String(outputAttributeName).trim()
+    );
+
+    const created = db.prepare(
+      "SELECT * FROM transform_functions WHERE id = ?"
+    ).get(result.lastInsertRowid);
+
+    return res.json({
+      success: true,
+      transform: { ...created, config: JSON.parse(created.config_json || "{}") },
+    });
+  } catch (error) {
+    console.error("Create transform error:", error);
+    return res.status(500).json({ success: false, message: "Failed to create transform" });
+  }
+});
+
+app.get("/transforms/:id", (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ success: false, message: "Invalid transform id" });
+    }
+
+    const row = db.prepare(
+      "SELECT * FROM transform_functions WHERE id = ?"
+    ).get(id);
+
+    if (!row) {
+      return res.status(404).json({ success: false, message: "Transform not found" });
+    }
+
+    return res.json({
+      success: true,
+      transform: { ...row, config: JSON.parse(row.config_json || "{}") },
+    });
+  } catch (error) {
+    console.error("Get transform error:", error);
+    return res.status(500).json({ success: false, message: "Failed to get transform" });
+  }
+});
+
+app.put("/transforms/:id", (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ success: false, message: "Invalid transform id" });
+    }
+
+    const existing = db.prepare(
+      "SELECT * FROM transform_functions WHERE id = ?"
+    ).get(id);
+
+    if (!existing) {
+      return res.status(404).json({ success: false, message: "Transform not found" });
+    }
+
+    const { name, description, config, outputDatasetId, outputAttributeName } = req.body;
+
+    const nextConfig = config || JSON.parse(existing.config_json || "{}");
+    const nextOutputDatasetId = outputDatasetId != null ? Number(outputDatasetId) : existing.output_dataset_id;
+    const nextOutputName = outputAttributeName
+      ? String(outputAttributeName).trim()
+      : existing.output_attribute_name;
+
+    const validationError = validateTransformConfig(
+      existing.function_type,
+      nextConfig,
+      nextOutputDatasetId,
+      nextOutputName,
+      id
+    );
+
+    if (validationError) {
+      return res.status(400).json({ success: false, message: validationError });
+    }
+
+    db.prepare(`
+      UPDATE transform_functions
+      SET name = ?,
+          description = ?,
+          config_json = ?,
+          output_dataset_id = ?,
+          output_attribute_name = ?,
+          execution_status = 'pending',
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(
+      name ? String(name).trim() : existing.name,
+      description != null ? String(description).trim() || null : existing.description,
+      JSON.stringify(nextConfig),
+      nextOutputDatasetId,
+      nextOutputName,
+      id
+    );
+
+    const updated = db.prepare(
+      "SELECT * FROM transform_functions WHERE id = ?"
+    ).get(id);
+
+    return res.json({
+      success: true,
+      transform: { ...updated, config: JSON.parse(updated.config_json || "{}") },
+    });
+  } catch (error) {
+    console.error("Update transform error:", error);
+    return res.status(500).json({ success: false, message: "Failed to update transform" });
+  }
+});
+
+app.delete("/transforms/:id", (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ success: false, message: "Invalid transform id" });
+    }
+
+    const existing = db.prepare(
+      "SELECT * FROM transform_functions WHERE id = ?"
+    ).get(id);
+
+    if (!existing) {
+      return res.status(404).json({ success: false, message: "Transform not found" });
+    }
+
+    db.prepare("DELETE FROM transform_functions WHERE id = ?").run(id);
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("Delete transform error:", error);
+    return res.status(500).json({ success: false, message: "Failed to delete transform" });
+  }
+});
+
+function parseDatasetSchema(schemaJson) {
+  try {
+    const parsed = JSON.parse(schemaJson || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function datasetHasField(schema, fieldName) {
+  return schema.some((column) => column?.name === fieldName);
+}
+
+function reviewFlagFieldName(outputAttr) {
+  return `${outputAttr}__needs_review`;
+}
+
+function loadMapperMappings(config) {
+  const taxonomyId = Number(config.taxonomyId);
+  const layerIndex = Number(config.layerIndex);
+  const inputDatasetId = Number(config.inputDatasetId);
+  const inputField = config.inputField;
+
+  let sql = `
+    SELECT raw_value, refined_value
+    FROM taxonomy_mappings
+    WHERE taxonomy_id = ? AND layer_index = ?
+  `;
+  const params = [taxonomyId, layerIndex];
+
+  if (Number.isInteger(inputDatasetId) && inputField) {
+    sql += " AND source_dataset_id = ? AND source_field = ?";
+    params.push(inputDatasetId, String(inputField));
+  }
+
+  return db.prepare(sql).all(...params);
+}
+
+function validateTransformConfig(functionType, config, outputDatasetId, outputAttributeName, transformId) {
+  if (!config || typeof config !== "object") {
+    return "Transform configuration is required";
+  }
+
+  const outputName = String(outputAttributeName || "").trim();
+  if (!outputName) {
+    return "outputAttributeName is required";
+  }
+
+  const outputDataset = db.prepare(
+    "SELECT id, schema_json FROM datasets WHERE id = ?"
+  ).get(Number(outputDatasetId));
+
+  if (!outputDataset) {
+    return "Output dataset not found";
+  }
+
+  const outputSchema = parseDatasetSchema(outputDataset.schema_json);
+  const conflictingOriginal = outputSchema.find(
+    (column) => column?.name === outputName && !column.isAppAttribute
+  );
+  if (conflictingOriginal) {
+    return `Output name "${outputName}" conflicts with an existing custom attribute`;
+  }
+
+  const existingAttr = db.prepare(`
+    SELECT transform_id FROM app_attributes
+    WHERE dataset_id = ? AND attribute_name = ?
+  `).get(Number(outputDatasetId), outputName);
+
+  if (
+    existingAttr &&
+    existingAttr.transform_id &&
+    transformId &&
+    Number(existingAttr.transform_id) !== Number(transformId)
+  ) {
+    return `Output name "${outputName}" is already generated by another transform`;
+  }
+
+  if (functionType === "string_mapper") {
+    const unmappedPolicy = config.unmappedPolicy || "keep_raw";
+    const validPolicies = ["keep_raw", "blank", "flag_review"];
+    if (!validPolicies.includes(unmappedPolicy)) {
+      return "unmappedPolicy must be keep_raw, blank, or flag_review";
+    }
+
+    if (!config.inputDatasetId || !config.inputField) {
+      return "Input dataset and field are required";
+    }
+
+    const inputDataset = db.prepare(
+      "SELECT id, schema_json FROM datasets WHERE id = ?"
+    ).get(Number(config.inputDatasetId));
+
+    if (!inputDataset) {
+      return "Input dataset not found";
+    }
+
+    const inputSchema = parseDatasetSchema(inputDataset.schema_json);
+    if (!datasetHasField(inputSchema, config.inputField)) {
+      return `Input field "${config.inputField}" was not found on the selected dataset`;
+    }
+
+    if (config.taxonomyId == null || config.layerIndex == null) {
+      return "Taxonomy and layer are required";
+    }
+
+    const taxonomy = db.prepare(
+      "SELECT id, sources_json, layers_json FROM taxonomies WHERE id = ?"
+    ).get(Number(config.taxonomyId));
+
+    if (!taxonomy) {
+      return "Selected taxonomy was not found";
+    }
+
+    const layers = JSON.parse(taxonomy.layers_json || "[]");
+    const sources = JSON.parse(taxonomy.sources_json || "[]");
+    const layerIndex = Number(config.layerIndex);
+
+    if (!layers[layerIndex]) {
+      return "Selected taxonomy layer does not exist";
+    }
+
+    const compatible = sources.some(
+      (source) =>
+        Number(source.datasetId) === Number(config.inputDatasetId) &&
+        source.fieldName === config.inputField &&
+        Number(source.layerIndex) === layerIndex
+    );
+
+    const derivedLayer = layers[layerIndex]?.origin === "derived";
+    if (!compatible && !derivedLayer) {
+      return "The selected taxonomy layer is not configured for this dataset field";
+    }
+  }
+
+  if (functionType === "column_combiner") {
+    if (!config.inputDatasetId || !config.field1 || !config.field2) {
+      return "Input dataset and both fields are required";
+    }
+
+    if (config.field1 === config.field2) {
+      return "The two input fields must be different";
+    }
+
+    const mismatchPolicy = config.mismatchPolicy || "flag_review";
+    if (!["flag_review", "blank"].includes(mismatchPolicy)) {
+      return "mismatchPolicy must be flag_review or blank";
+    }
+
+    const inputDataset = db.prepare(
+      "SELECT id, schema_json FROM datasets WHERE id = ?"
+    ).get(Number(config.inputDatasetId));
+
+    if (!inputDataset) {
+      return "Input dataset not found";
+    }
+
+    const inputSchema = parseDatasetSchema(inputDataset.schema_json);
+    if (!datasetHasField(inputSchema, config.field1)) {
+      return `Field "${config.field1}" was not found on the selected dataset`;
+    }
+    if (!datasetHasField(inputSchema, config.field2)) {
+      return `Field "${config.field2}" was not found on the selected dataset`;
+    }
+  }
+
+  return null;
+}
+
+function runTransform(functionType, records, config) {
+  if (functionType === "string_mapper") {
+    return applyStringMapper(records, config, loadMapperMappings(config));
+  }
+
+  if (functionType === "column_combiner") {
+    return applyColumnCombiner(records, config);
+  }
+
+  return null;
+}
+
+function applyResultsToRecords({
+  outputRecords,
+  outputSchema,
+  inputRecords,
+  inputSchema,
+  results,
+  outputAttr,
+  functionType,
+  includeReviewFlag,
+}) {
+  const inputId = getIdColumn(inputSchema);
+  const outputId = getIdColumn(outputSchema);
+  const canJoinById = !inputId.error && !outputId.error;
+
+  const resultById = new Map();
+  if (canJoinById) {
+    inputRecords.forEach((record, index) => {
+      const id = normalizeIdValue(record?.[inputId.column.name]);
+      if (id) {
+        resultById.set(id, results[index]);
+      }
+    });
+  }
+
+  const reviewField = reviewFlagFieldName(outputAttr);
+
+  return outputRecords.map((record, index) => {
+    const next = { ...record };
+    let result;
+
+    if (canJoinById) {
+      const id = normalizeIdValue(record?.[outputId.column.name]);
+      result = id ? resultById.get(id) : undefined;
+    } else {
+      result = results[index];
+    }
+
+    if (result === undefined) {
+      next[outputAttr] = null;
+      if (includeReviewFlag) {
+        next[reviewField] = null;
+      }
+      return next;
+    }
+
+    next[outputAttr] = functionType === "string_mapper"
+      ? result.refinedOutput
+      : result.output;
+
+    if (includeReviewFlag) {
+      next[reviewField] = result.needsReview ? "true" : "false";
+    }
+
+    return next;
+  });
+}
+
+/* =======================================================
+   TRANSFORM — PREVIEW
+======================================================= */
+
+app.post("/transforms/:id/preview", (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ success: false, message: "Invalid transform id" });
+    }
+
+    const transform = db.prepare(
+      "SELECT * FROM transform_functions WHERE id = ?"
+    ).get(id);
+
+    if (!transform) {
+      return res.status(404).json({ success: false, message: "Transform not found" });
+    }
+
+    const config = JSON.parse(transform.config_json || "{}");
+    const { sampleSize = 50 } = req.body || {};
+
+    const inputDatasetId = Number(config.inputDatasetId);
+    const dataset = db.prepare(
+      "SELECT data_json FROM datasets WHERE id = ?"
+    ).get(inputDatasetId);
+
+    if (!dataset) {
+      return res.status(404).json({ success: false, message: "Input dataset not found" });
+    }
+
+    const records = JSON.parse(dataset.data_json || "[]");
+    const sample = records.slice(0, Math.min(Number(sampleSize) || 50, records.length));
+
+    let previewResult;
+    if (transform.function_type === "string_mapper") {
+      previewResult = applyStringMapper(sample, config);
+    } else if (transform.function_type === "column_combiner") {
+      previewResult = applyColumnCombiner(sample, config);
+    } else {
+      return res.status(400).json({ success: false, message: "Unknown function type" });
+    }
+
+    /* Check if taxonomy version has changed since last execution */
+    let taxonomyStale = false;
+    if (transform.function_type === "string_mapper" && config.taxonomyId) {
+      const taxonomy = db.prepare(
+        "SELECT version FROM taxonomies WHERE id = ?"
+      ).get(Number(config.taxonomyId));
+      if (
+        taxonomy &&
+        transform.taxonomy_version_at_execution != null &&
+        taxonomy.version !== transform.taxonomy_version_at_execution
+      ) {
+        taxonomyStale = true;
+      }
+    }
+
+    return res.json({
+      success: true,
+      functionType: transform.function_type,
+      ...previewResult,
+      sampleSize: sample.length,
+      totalRecords: records.length,
+      taxonomyStale,
+    });
+  } catch (error) {
+    console.error("Preview transform error:", error);
+    return res.status(500).json({ success: false, message: "Failed to preview transform" });
+  }
+});
+
+/* =======================================================
+   TRANSFORM — EXECUTE
+======================================================= */
+
+app.post("/transforms/:id/execute", (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ success: false, message: "Invalid transform id" });
+    }
+
+    const transform = db.prepare(
+      "SELECT * FROM transform_functions WHERE id = ?"
+    ).get(id);
+
+    if (!transform) {
+      return res.status(404).json({ success: false, message: "Transform not found" });
+    }
+
+    const config = JSON.parse(transform.config_json || "{}");
+    const outputDatasetId = Number(transform.output_dataset_id);
+    const outputAttr = transform.output_attribute_name;
+
+    if (!outputDatasetId || !outputAttr) {
+      return res.status(400).json({
+        success: false,
+        message: "Transform is missing output dataset or attribute name",
+      });
+    }
+
+    const outputDataset = db.prepare(
+      "SELECT id, schema_json, data_json FROM datasets WHERE id = ?"
+    ).get(outputDatasetId);
+
+    if (!outputDataset) {
+      return res.status(404).json({ success: false, message: "Output dataset not found" });
+    }
+
+    /* For string_mapper, inputDataset may differ from outputDataset.
+       We read input records and write output attribute to outputDataset. */
+    const inputDatasetId = Number(config.inputDatasetId);
+
+    let inputRecords;
+    let inputSchema;
+    if (inputDatasetId === outputDatasetId) {
+      /* Same dataset */
+      inputRecords = JSON.parse(outputDataset.data_json || "[]");
+      inputSchema = JSON.parse(outputDataset.schema_json || "[]");
+    } else {
+      /* Load input dataset separately */
+      const inputDataset = db.prepare(
+        "SELECT schema_json, data_json FROM datasets WHERE id = ?"
+      ).get(inputDatasetId);
+      if (!inputDataset) {
+        return res.status(404).json({ success: false, message: "Input dataset not found" });
+      }
+      inputRecords = JSON.parse(inputDataset.data_json || "[]");
+      inputSchema = JSON.parse(inputDataset.schema_json || "[]");
+    }
+
+    const outputRecords = JSON.parse(outputDataset.data_json || "[]");
+
+    /* Build result map keyed by record index assuming same ordering when same dataset,
+       or by _id when different datasets */
+    let transformResult;
+    if (transform.function_type === "string_mapper") {
+      transformResult = applyStringMapper(inputRecords, config);
+    } else if (transform.function_type === "column_combiner") {
+      transformResult = applyColumnCombiner(inputRecords, config);
+    } else {
+      return res.status(400).json({ success: false, message: "Unknown function type" });
+    }
+
+    /* Update schema to include the new App Attribute column */
+    let schema = [];
+    try {
+      schema = JSON.parse(outputDataset.schema_json || "[]");
+    } catch {
+      schema = [];
+    }
+
+    const includeReviewFlag =
+      (transform.function_type === "string_mapper" &&
+        config.unmappedPolicy === "flag_review") ||
+      (transform.function_type === "column_combiner" &&
+        (config.mismatchPolicy || "flag_review") === "flag_review");
+
+    /* Join by _id when the source and output datasets differ. This preserves
+       Raw/Tagged record relationships instead of assuming matching row order. */
+    const updatedRecords = applyResultsToRecords({
+      outputRecords,
+      outputSchema: schema,
+      inputRecords,
+      inputSchema,
+      results: transformResult.results,
+      outputAttr,
+      functionType: transform.function_type,
+      includeReviewFlag,
+    });
+
+    /* Remove existing entry for this attribute (idempotent) */
+    const schemaWithoutAttr = schema.filter(
+      (col) => col.name !== outputAttr
+    );
+
+    const newSchemaCol = {
+      name: outputAttr,
+      type: transformResult.results.some(
+        (result) => Array.isArray(result.output)
+      ) ? "list" : "text",
+      ontologyMapping: "",
+      isAppAttribute: true,
+      transformId: id,
+    };
+
+    const reviewField = reviewFlagFieldName(outputAttr);
+    const schemaWithoutReviewField = schemaWithoutAttr.filter(
+      (col) => col.name !== reviewField
+    );
+    const updatedSchema = [
+      ...schemaWithoutReviewField,
+      newSchemaCol,
+      ...(includeReviewFlag ? [{
+        name: reviewField,
+        type: "text",
+        ontologyMapping: "",
+        isAppAttribute: true,
+        transformId: id,
+      }] : []),
+    ];
+
+    /* Get taxonomy version at execution */
+    let taxonomyVersion = null;
+    if (transform.function_type === "string_mapper" && config.taxonomyId) {
+      const taxonomy = db.prepare(
+        "SELECT version FROM taxonomies WHERE id = ?"
+      ).get(Number(config.taxonomyId));
+      taxonomyVersion = taxonomy ? taxonomy.version : null;
+    }
+
+    /* Persist atomically */
+    const executeTransaction = db.transaction(() => {
+      const sizeKB = Buffer.byteLength(JSON.stringify(updatedRecords)) / 1024;
+
+      db.prepare(`
+        UPDATE datasets
+        SET data_json = ?,
+            schema_json = ?,
+            size_kb = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(
+        JSON.stringify(updatedRecords),
+        JSON.stringify(updatedSchema),
+        sizeKB,
+        outputDatasetId
+      );
+
+      /* Register in app_attributes */
+      db.prepare(`
+        INSERT INTO app_attributes (dataset_id, attribute_name, transform_id)
+        VALUES (?, ?, ?)
+        ON CONFLICT(dataset_id, attribute_name) DO UPDATE SET
+          transform_id = excluded.transform_id,
+          created_at = created_at
+      `).run(outputDatasetId, outputAttr, id);
+
+      if (includeReviewFlag) {
+        db.prepare(`
+          INSERT INTO app_attributes (dataset_id, attribute_name, transform_id)
+          VALUES (?, ?, ?)
+          ON CONFLICT(dataset_id, attribute_name) DO UPDATE SET
+            transform_id = excluded.transform_id
+        `).run(outputDatasetId, reviewField, id);
+      } else {
+        db.prepare(`
+          DELETE FROM app_attributes
+          WHERE dataset_id = ? AND attribute_name = ? AND transform_id = ?
+        `).run(outputDatasetId, reviewField, id);
+      }
+
+      /* Update transform execution status */
+      db.prepare(`
+        UPDATE transform_functions
+        SET execution_status = 'executed',
+            last_executed_at = CURRENT_TIMESTAMP,
+            taxonomy_version_at_execution = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(taxonomyVersion, id);
+    });
+
+    executeTransaction();
+
+    return res.json({
+      success: true,
+      ...transformResult.summary,
+      outputDatasetId,
+      outputAttributeName: outputAttr,
+    });
+  } catch (error) {
+    console.error("Execute transform error:", error);
+
+    /* Mark transform as errored */
+    try {
+      db.prepare(`
+        UPDATE transform_functions
+        SET execution_status = 'error', updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(Number(req.params.id));
+    } catch (_) { /* best effort */ }
+
+    return res.status(500).json({ success: false, message: "Failed to execute transform" });
+  }
+});
+
+/* =======================================================
+   TRANSFORM — UNMAPPED VALUE SUMMARY
+======================================================= */
+
+app.get("/transforms/:id/unmapped", (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ success: false, message: "Invalid transform id" });
+    }
+
+    const transform = db.prepare(
+      "SELECT * FROM transform_functions WHERE id = ?"
+    ).get(id);
+
+    if (!transform) {
+      return res.status(404).json({ success: false, message: "Transform not found" });
+    }
+
+    if (transform.function_type !== "string_mapper") {
+      return res.json({ success: true, unmapped: [], message: "Only string_mapper transforms have unmapped values" });
+    }
+
+    const config = JSON.parse(transform.config_json || "{}");
+    const { inputDatasetId, inputField, taxonomyId, layerIndex } = config;
+
+    if (!inputDatasetId || !inputField || taxonomyId == null || layerIndex == null) {
+      return res.status(400).json({ success: false, message: "Transform config is incomplete" });
+    }
+
+    const dataset = db.prepare(
+      "SELECT data_json FROM datasets WHERE id = ?"
+    ).get(Number(inputDatasetId));
+
+    if (!dataset) {
+      return res.status(404).json({ success: false, message: "Input dataset not found" });
+    }
+
+    const records = JSON.parse(dataset.data_json || "[]");
+
+    const mappingRows = db.prepare(`
+      SELECT raw_value
+      FROM taxonomy_mappings
+      WHERE taxonomy_id = ? AND layer_index = ?
+    `).all(Number(taxonomyId), Number(layerIndex));
+
+    const mappedKeys = new Set(
+      mappingRows.map((r) => String(r.raw_value).trim().toLowerCase())
+    );
+
+    const unmappedCounts = new Map();
+    for (const record of records) {
+      const rawVal = record[inputField];
+      if (rawVal == null || String(rawVal).trim() === "") continue;
+      const key = String(rawVal).trim().toLowerCase();
+      if (!mappedKeys.has(key)) {
+        const display = String(rawVal).trim();
+        unmappedCounts.set(display, (unmappedCounts.get(display) || 0) + 1);
+      }
+    }
+
+    const unmapped = Array.from(unmappedCounts.entries()).map(([value, count]) => ({
+      value,
+      count,
+    })).sort((a, b) => b.count - a.count);
+
+    return res.json({ success: true, unmapped });
+  } catch (error) {
+    console.error("Unmapped values error:", error);
+    return res.status(500).json({ success: false, message: "Failed to get unmapped values" });
+  }
+});
+
+/* =======================================================
+   APP ATTRIBUTES — LIST FOR DATASET
+======================================================= */
+
+app.get("/datasets/:id/app-attributes", (req, res) => {
+  try {
+    const datasetId = Number(req.params.id);
+    if (!Number.isInteger(datasetId)) {
+      return res.status(400).json({ success: false, message: "Invalid dataset id" });
+    }
+
+    const attrs = db.prepare(`
+      SELECT aa.id, aa.attribute_name, aa.transform_id, aa.created_at,
+             tf.name as transform_name, tf.function_type, tf.execution_status
+      FROM app_attributes aa
+      LEFT JOIN transform_functions tf ON tf.id = aa.transform_id
+      WHERE aa.dataset_id = ?
+      ORDER BY aa.created_at DESC
+    `).all(datasetId);
+
+    return res.json({ success: true, appAttributes: attrs });
+  } catch (error) {
+    console.error("App attributes error:", error);
+    return res.status(500).json({ success: false, message: "Failed to get app attributes" });
+  }
+});
+
+/* =======================================================
+   STATIC FRONTEND & SERVER
+======================================================= */
+
+const distPath = path.resolve(__dirname, "../../dist");
+app.use(express.static(distPath));
+
+app.use((req, res, next) => {
+  if (
+    req.method !== "GET" ||
+    req.path.startsWith("/datasets") ||
+    req.path.startsWith("/upload") ||
+    req.path.startsWith("/ollama") ||
+    req.path.startsWith("/taxonomies") ||
+    req.path.startsWith("/transforms")
+  ) {
+    return next();
+  }
+  res.sendFile(path.join(distPath, "index.html"), (err) => {
+    if (err) next();
+  });
+});
+
+const PORT = process.env.PORT || 5000;
+
+app.listen(
+  PORT,
+  () => {
     console.log(
-      "Server running on port 5000"
+      `Server running on port ${PORT}`
     );
   }
 );

@@ -471,6 +471,15 @@ export default function DataIngestion({
 
   }
 
+  function handleCreateNewDataset() {
+
+    clearRefreshMode();
+    setDatasetName("");
+    setIngestionType("raw");
+    setParentDatasetId(null);
+
+  }
+
   /* ====================================================
      NEXT FROM DATASET STEP
   ==================================================== */
@@ -881,12 +890,12 @@ export default function DataIngestion({
               handleSelectRefreshDataset
             }
 
-            selectedRefreshDatasetId={
-              refreshDatasetId
+            onCreateNewDataset={
+              handleCreateNewDataset
             }
 
-            setSelectedRefreshDatasetId={
-              setRefreshDatasetId
+            selectedRefreshDatasetId={
+              refreshDatasetId
             }
 
           />
