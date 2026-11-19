@@ -43,11 +43,10 @@ export function expandRawValues(rawVal) {
           .filter((item) => item !== null && item !== "");
       }
     } catch {
-      return text
-        .slice(1, -1)
-        .split(",")
-        .map((item) => item.trim().replace(/^["']|["']$/g, "").trim())
-        .filter(Boolean);
+      // Support Python-style single quoted lists without evaluating input as code.
+      const contents = text.slice(1, -1).trim();
+      const parts = contents.match(/(?:'[^']*'|"[^"]*"|[^,]+)(?:\s*,|$)/g) || [];
+      return parts.map((item) => item.replace(/,\s*$/, "").trim().replace(/^(?:'([\s\S]*)'|"([\s\S]*)")$/, "$1$2").trim()).filter(Boolean);
     }
   }
 
@@ -100,8 +99,8 @@ export function applyStringMapper(records, config, mappingRows) {
 
   const lookupMap = new Map();
   for (const row of mappingRows || []) {
+    if (row.refined_value == null || String(row.refined_value).trim() === "" || row.review_status === "unmapped") continue;
     lookupMap.set(mappingLookupKey(row.raw_value), {
-      raw: row.raw_value,
       refined: row.refined_value,
     });
   }
@@ -112,6 +111,8 @@ export function applyStringMapper(records, config, mappingRows) {
   let blankCount = 0;
   let changedCount = 0;
   let flaggedCount = 0;
+  let totalEntities = 0;
+  let recordsWithUnmapped = 0;
 
   for (const record of records) {
     const rawInput = record?.[inputField];
@@ -142,16 +143,16 @@ export function applyStringMapper(records, config, mappingRows) {
     }
 
     const mappedParts = [];
-    let allMapped = true;
-    let anyMapped = false;
+    let entityMappedCount = 0;
+    let entityUnmappedCount = 0;
 
     for (const part of expanded) {
       const match = lookupMap.get(mappingLookupKey(part));
       if (match) {
-        anyMapped = true;
-        mappedParts.push(match.refined != null ? match.refined : match.raw);
+        mappedParts.push(match.refined);
+        entityMappedCount += 1;
       } else {
-        allMapped = false;
+        entityUnmappedCount += 1;
         if (unmappedPolicy === "blank") {
           mappedParts.push(null);
         } else {
@@ -160,39 +161,22 @@ export function applyStringMapper(records, config, mappingRows) {
       }
     }
 
-    const refinedParts = mappedParts.filter((part) => part != null && part !== "");
-    const originalWasArray = Array.isArray(rawInput);
-    let refinedOutput;
-
-    if (unmappedPolicy === "blank" && !allMapped && expanded.length === 1) {
-      refinedOutput = null;
-    } else if (originalWasArray) {
-      refinedOutput = refinedParts;
-    } else if (expanded.length === 1) {
-      refinedOutput = mappedParts[0];
-    } else {
-      refinedOutput = refinedParts.join(", ");
-    }
-
-    const needsReview = unmappedPolicy === "flag_review" && !allMapped;
+    const originalWasArray = Array.isArray(rawInput) || (typeof rawInput === "string" && rawInput.trim().startsWith("[") && rawInput.trim().endsWith("]"));
+    const needsReview = unmappedPolicy === "flag_review" && entityUnmappedCount > 0;
+    const refinedOutput = originalWasArray
+      ? mappedParts
+      : mappedParts[0];
+    totalEntities += expanded.length;
     if (needsReview) {
       flaggedCount += 1;
     }
 
-    if (allMapped) {
-      mappedCount += 1;
-    } else {
-      unmappedCount += 1;
-    }
+    mappedCount += entityMappedCount;
+    unmappedCount += entityUnmappedCount;
+    if (entityUnmappedCount > 0) recordsWithUnmapped += 1;
 
-    const comparableRaw = originalWasArray
-      ? expanded.join(", ")
-      : String(rawInput).trim();
-    const comparableOut = Array.isArray(refinedOutput)
-      ? refinedOutput.join(", ")
-      : refinedOutput == null
-        ? ""
-        : String(refinedOutput);
+    const comparableRaw = JSON.stringify(expanded);
+    const comparableOut = JSON.stringify(Array.isArray(refinedOutput) ? refinedOutput : [refinedOutput]);
 
     if (comparableOut !== comparableRaw) {
       changedCount += 1;
@@ -201,7 +185,9 @@ export function applyStringMapper(records, config, mappingRows) {
     results.push({
       rawInput,
       refinedOutput,
-      mappingFound: anyMapped && allMapped,
+      mappingFound: entityUnmappedCount === 0,
+      mappedEntities: entityMappedCount,
+      unmappedEntities: entityUnmappedCount,
       needsReview,
       isBlank: false,
     });
@@ -211,8 +197,11 @@ export function applyStringMapper(records, config, mappingRows) {
     results,
     summary: {
       total: records.length,
+      totalRecords: records.length,
+      totalEntities,
       mapped: mappedCount,
       unmapped: unmappedCount,
+      recordsWithUnmapped,
       blank: blankCount,
       changed: changedCount,
       flagged: flaggedCount,

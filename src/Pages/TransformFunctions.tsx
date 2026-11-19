@@ -250,8 +250,14 @@ function CreateTransform({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const smInputDataset = datasets.find((d) => d.id === smInputDatasetId);
-  const ccInputDataset = datasets.find((d) => d.id === ccInputDatasetId);
+  /* Filter only tagged datasets for transform functions */
+  const taggedDatasets = datasets.filter((d) => {
+    const t = String(d.data_type || (d as any).dataType || (d as any).ingestion_type || "").toLowerCase();
+    return t === "tagged";
+  });
+
+  const smInputDataset = taggedDatasets.find((d) => d.id === smInputDatasetId);
+  const ccInputDataset = taggedDatasets.find((d) => d.id === ccInputDatasetId);
 
   const smFields = (smInputDataset?.schema_json || []).filter(
     (c) => !c.isAppAttribute && c.ontologyMapping !== "_id"
@@ -268,10 +274,21 @@ function CreateTransform({
     if (!outputDatasetId) { setError("Output dataset is required"); return; }
     if (!outputAttr.trim()) { setError("Output attribute name is required"); return; }
 
+    const targetDs = taggedDatasets.find((d) => d.id === outputDatasetId);
+    if (!targetDs) {
+      setError("Target dataset must be a Tagged dataset");
+      return;
+    }
+
     let config: any;
     if (funcType === "string_mapper") {
       if (!smInputDatasetId || !smInputField) { setError("Select input dataset and field"); return; }
       if (!smTaxonomyId) { setError("Select a taxonomy"); return; }
+      const inputDs = taggedDatasets.find((d) => d.id === smInputDatasetId);
+      if (!inputDs) {
+        setError("Input dataset must be a Tagged dataset");
+        return;
+      }
       config = {
         inputDatasetId: smInputDatasetId,
         inputField: smInputField,
@@ -283,6 +300,11 @@ function CreateTransform({
     } else {
       if (!ccInputDatasetId || !ccField1 || !ccField2) { setError("Select input dataset and both fields"); return; }
       if (ccField1 === ccField2) { setError("Field 1 and Field 2 must be different"); return; }
+      const inputDs = taggedDatasets.find((d) => d.id === ccInputDatasetId);
+      if (!inputDs) {
+        setError("Input dataset must be a Tagged dataset");
+        return;
+      }
       config = {
         inputDatasetId: ccInputDatasetId,
         field1: ccField1,
@@ -412,11 +434,27 @@ function CreateTransform({
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
                   <div>
-                    <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 6 }}>Input Dataset *</label>
-                    <select value={smInputDatasetId ?? ""} onChange={(e) => { setSmInputDatasetId(e.target.value ? Number(e.target.value) : null); setSmInputField(""); }} style={{ width: "100%", fontSize: 13 }}>
+                    <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 6 }}>Input Dataset * (Tagged only)</label>
+                    <select
+                      value={smInputDatasetId ?? ""}
+                      onChange={(e) => {
+                        const val = e.target.value ? Number(e.target.value) : null;
+                        setSmInputDatasetId(val);
+                        setSmInputField("");
+                        if (val && !outputDatasetId) {
+                          setOutputDatasetId(val);
+                        }
+                      }}
+                      style={{ width: "100%", fontSize: 13 }}
+                    >
                       <option value="">Select dataset…</option>
-                      {datasets.map((d) => <option key={d.id} value={d.id}>{d.dataset_name} ({d.data_type})</option>)}
+                      {taggedDatasets.map((d) => <option key={d.id} value={d.id}>{d.dataset_name}</option>)}
                     </select>
+                    {taggedDatasets.length === 0 && (
+                      <p style={{ fontSize: 11, color: "#F87171", marginTop: 4 }}>
+                        No tagged datasets available. Only Tagged datasets can be used for transform functions.
+                      </p>
+                    )}
                   </div>
                   <div>
                     <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 6 }}>Input Field *</label>
@@ -471,11 +509,28 @@ function CreateTransform({
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                 <div>
-                  <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 6 }}>Input Dataset *</label>
-                  <select value={ccInputDatasetId ?? ""} onChange={(e) => { setCcInputDatasetId(e.target.value ? Number(e.target.value) : null); setCcField1(""); setCcField2(""); }} style={{ width: "100%", fontSize: 13 }}>
+                  <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 6 }}>Input Dataset * (Tagged only)</label>
+                  <select
+                    value={ccInputDatasetId ?? ""}
+                    onChange={(e) => {
+                      const val = e.target.value ? Number(e.target.value) : null;
+                      setCcInputDatasetId(val);
+                      setCcField1("");
+                      setCcField2("");
+                      if (val && !outputDatasetId) {
+                        setOutputDatasetId(val);
+                      }
+                    }}
+                    style={{ width: "100%", fontSize: 13 }}
+                  >
                     <option value="">Select dataset…</option>
-                    {datasets.map((d) => <option key={d.id} value={d.id}>{d.dataset_name} ({d.data_type})</option>)}
+                    {taggedDatasets.map((d) => <option key={d.id} value={d.id}>{d.dataset_name}</option>)}
                   </select>
+                  {taggedDatasets.length === 0 && (
+                    <p style={{ fontSize: 11, color: "#F87171", marginTop: 4 }}>
+                      No tagged datasets available. Only Tagged datasets can be used for transform functions.
+                    </p>
+                  )}
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: 12, alignItems: "flex-end" }}>
                   <div>
@@ -551,11 +606,16 @@ function CreateTransform({
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
               <div>
-                <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 6 }}>Target Dataset *</label>
+                <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 6 }}>Target Dataset * (Tagged only)</label>
                 <select value={outputDatasetId ?? ""} onChange={(e) => setOutputDatasetId(e.target.value ? Number(e.target.value) : null)} style={{ width: "100%", fontSize: 13 }}>
                   <option value="">Select dataset…</option>
-                  {datasets.map((d) => <option key={d.id} value={d.id}>{d.dataset_name} ({d.data_type})</option>)}
+                  {taggedDatasets.map((d) => <option key={d.id} value={d.id}>{d.dataset_name}</option>)}
                 </select>
+                {taggedDatasets.length === 0 && (
+                  <p style={{ fontSize: 11, color: "#F87171", marginTop: 4 }}>
+                    No tagged datasets available. Only Tagged datasets can be used for transform functions.
+                  </p>
+                )}
               </div>
               <div>
                 <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 6 }}>App Attribute Name *</label>
@@ -589,11 +649,13 @@ function TransformDetail({
   datasets,
   onBack,
   onUpdated,
+  onDelete,
 }: {
   transform: TransformFunction;
   datasets: Dataset[];
   onBack: () => void;
   onUpdated: (t: TransformFunction) => void;
+  onDelete?: (t: TransformFunction) => void;
 }) {
   const [transform, setTransform] = useState(initialTransform);
   const [preview, setPreview] = useState<any>(null);
@@ -696,6 +758,17 @@ function TransformDetail({
         </div>
         <FunctionTypeBadge type={transform.function_type} />
         <StatusBadge status={transform.execution_status} />
+        {onDelete && (
+          <button
+            className="btn-danger"
+            onClick={() => onDelete(transform)}
+            style={{ fontSize: 12, padding: "6px 12px", display: "inline-flex", alignItems: "center", gap: 6 }}
+            title="Delete Transform"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+            Delete
+          </button>
+        )}
       </div>
 
       {/* Stale warning */}
@@ -966,13 +1039,38 @@ export default function TransformFunctions({ navigate: _navigate }: Props) {
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.message);
       setTransforms((prev) => prev.filter((t) => t.id !== tf.id));
+      if (selectedTransform?.id === tf.id) {
+        setSelectedTransform(null);
+        setView("list");
+      }
       setDeleteTarget(null);
+      await loadAll();
     } catch (err: any) {
       setDeleteError(err.message);
     } finally {
       setDeleteLoading(false);
     }
   }
+
+  const deleteModal = deleteTarget && (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+      <div style={{ background: "var(--bg-modal)", border: "1px solid var(--border-subtle)", borderRadius: 12, padding: 28, width: 440, boxShadow: "var(--shadow-lg)" }}>
+        <h3 style={{ fontSize: 16, fontWeight: 700, color: "var(--text-primary)", marginBottom: 12 }}>Delete Transform</h3>
+        <p style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 20 }}>
+          Delete <strong style={{ color: "var(--text-primary)" }}>{deleteTarget.name}</strong>? This will remove the transform definition and permanently delete the associated App Attribute field ({deleteTarget.output_attribute_name ? <strong style={{ color: "var(--accent-cyan)" }}>{deleteTarget.output_attribute_name}</strong> : "generated field"}) from the dataset and investigation workspace.
+        </p>
+        {deleteError && (
+          <div style={{ padding: "10px 14px", borderRadius: 6, background: "rgba(239,68,68,0.12)", color: "#F87171", fontSize: 13, marginBottom: 16 }}>{deleteError}</div>
+        )}
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+          <button className="btn-secondary" onClick={() => { setDeleteTarget(null); setDeleteError(null); }} disabled={deleteLoading}>Cancel</button>
+          <button className="btn-danger" onClick={() => handleDelete(deleteTarget)} disabled={deleteLoading}>
+            {deleteLoading ? "Deleting…" : "Delete"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 
   if (view === "create") {
     return (
@@ -987,6 +1085,7 @@ export default function TransformFunctions({ navigate: _navigate }: Props) {
           }}
           onCancel={() => setView("list")}
         />
+        {deleteModal}
       </div>
     );
   }
@@ -1002,7 +1101,9 @@ export default function TransformFunctions({ navigate: _navigate }: Props) {
             setSelectedTransform(updated);
             setTransforms((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
           }}
+          onDelete={(t) => setDeleteTarget(t)}
         />
+        {deleteModal}
       </div>
     );
   }
@@ -1017,27 +1118,7 @@ export default function TransformFunctions({ navigate: _navigate }: Props) {
         onDelete={(t) => setDeleteTarget(t)}
         onRefresh={loadAll}
       />
-
-      {/* Delete confirmation */}
-      {deleteTarget && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
-          <div style={{ background: "var(--bg-modal)", border: "1px solid var(--border-subtle)", borderRadius: 12, padding: 28, width: 420, boxShadow: "var(--shadow-lg)" }}>
-            <h3 style={{ fontSize: 16, fontWeight: 700, color: "var(--text-primary)", marginBottom: 12 }}>Delete Transform</h3>
-            <p style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 20 }}>
-              Delete <strong style={{ color: "var(--text-primary)" }}>{deleteTarget.name}</strong>? The App Attribute values already written to the dataset will remain, but the transform definition will be removed.
-            </p>
-            {deleteError && (
-              <div style={{ padding: "10px 14px", borderRadius: 6, background: "rgba(239,68,68,0.12)", color: "#F87171", fontSize: 13, marginBottom: 16 }}>{deleteError}</div>
-            )}
-            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-              <button className="btn-secondary" onClick={() => { setDeleteTarget(null); setDeleteError(null); }} disabled={deleteLoading}>Cancel</button>
-              <button className="btn-danger" onClick={() => handleDelete(deleteTarget)} disabled={deleteLoading}>
-                {deleteLoading ? "Deleting…" : "Delete"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {deleteModal}
     </div>
   );
 }

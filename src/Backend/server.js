@@ -2028,6 +2028,34 @@ app.post(
          an uploaded CSV.
       ------------------------------------------------- */
 
+      /* -------------------------------------------------
+         _id COLUMN
+      ------------------------------------------------- */
+
+      const idColumnResult =
+        getIdColumn(
+          schema
+        );
+
+      if (
+        idColumnResult.error
+      ) {
+
+        return res.status(
+          400
+        ).json({
+
+          success: false,
+
+          message:
+            `The dataset schema is invalid: ${idColumnResult.error}`,
+
+        });
+      }
+
+      const idColumn =
+        idColumnResult.column.name;
+
       const existingHeaders =
         getDatasetHeaders(
           existingData,
@@ -2054,9 +2082,8 @@ app.post(
           (header) => !existingHeaders.includes(header)
         );
 
-      if (
-        missingColumns.length > 0
-      ) {
+      /* The incoming file MUST contain the dataset ID column */
+      if (!incomingHeaders.includes(idColumn)) {
 
         return res.status(
           400
@@ -2068,7 +2095,7 @@ app.post(
             "HEADER_MISMATCH",
 
           message:
-            `The upload is missing existing dataset column(s): ${missingColumns.join(", ")}. Include all existing source columns when updating this dataset.`,
+            `The upload is missing the required dataset ID column '${idColumn}'. Include the ID column to match and update records.`,
 
           expectedHeaders:
             existingHeaders,
@@ -2077,7 +2104,7 @@ app.post(
             incomingHeaders,
 
           missingColumns:
-            missingColumns,
+            [idColumn],
 
           unexpectedColumns:
             [],
@@ -2089,8 +2116,11 @@ app.post(
         ? [...schema]
         : [];
 
+      const clientSchema = Array.isArray(req.body.schema) ? req.body.schema : [];
+
       addedColumns.forEach((columnName) => {
-        const looksLikeList = data.some((row) => {
+        const clientCol = clientSchema.find((c) => c && c.name === columnName);
+        const looksLikeList = clientCol?.type === "list" || data.some((row) => {
           const value = row?.[columnName];
           if (Array.isArray(value)) return true;
           const text = String(value ?? "").trim();
@@ -2099,8 +2129,8 @@ app.post(
 
         updatedSchema.push({
           name: columnName,
-          type: looksLikeList ? "list" : "string",
-          ontologyMapping: "",
+          type: clientCol?.type || (looksLikeList ? "list" : "string"),
+          ontologyMapping: clientCol?.ontologyMapping || "",
           include: true,
         });
       });
@@ -2127,35 +2157,6 @@ app.post(
           data,
           updatedSchema
         );
-
-      /* -------------------------------------------------
-         _id COLUMN
-      ------------------------------------------------- */
-
-      const idColumnResult =
-        getIdColumn(
-          schema
-          
-        );
-
-      if (
-        idColumnResult.error
-      ) {
-
-        return res.status(
-          400
-        ).json({
-
-          success: false,
-
-          message:
-            `The dataset schema is invalid: ${idColumnResult.error}`,
-
-        });
-      }
-
-      const idColumn =
-        idColumnResult.column.name;
 
       /* -------------------------------------------------
          INCOMING IDs MUST BE PRESENT AND UNIQUE
@@ -2431,8 +2432,14 @@ app.post(
               merged.length
             );
 
-            /* New record — no App Attribute values yet */
-            const newRow = { ...row };
+            /* New record — initialize from updatedSchema columns, then copy incoming values */
+            const newRow = {};
+            updatedSchema.forEach((col) => {
+              if (col && col.name) {
+                newRow[col.name] = isListSchemaColumn(col) ? [] : null;
+              }
+            });
+            Object.assign(newRow, row);
             appAttrNames.forEach(
               (attr) => {
                 newRow[attr] = null;
@@ -2448,9 +2455,11 @@ app.post(
             return;
           }
 
-          /* Updated source record — clear derived values. They may no longer
-             reflect incoming source values and must be recomputed. */
-          const updatedRow = { ...row };
+          /* Updated source record — override existing fields with incoming fields, preserve unmentioned fields, clear derived values. */
+          const updatedRow = {
+            ...merged[existingIndex],
+            ...row,
+          };
           appAttrNames.forEach(
             (attr) => {
               updatedRow[attr] = null;
@@ -2463,6 +2472,18 @@ app.post(
           updated += 1;
         }
       );
+
+      /* Ensure all existing records have new columns from addedColumns */
+      if (addedColumns.length > 0) {
+        merged.forEach((record) => {
+          addedColumns.forEach((colName) => {
+            if (!(colName in record) || record[colName] === undefined) {
+              const colDef = updatedSchema.find((c) => c.name === colName);
+              record[colName] = colDef && isListSchemaColumn(colDef) ? [] : null;
+            }
+          });
+        });
+      }
 
       /* -------------------------------------------------
          PREVIEW ONLY
@@ -5030,6 +5051,36 @@ app.post("/ollama/save-tagged-dataset", (req, res) => {
    TAXONOMY CRUD
 ======================================================= */
 
+function validateTaxonomySources(sources, layers) {
+  if (!Array.isArray(sources) || sources.length === 0) {
+    return "Add at least one source dataset and field before saving the taxonomy";
+  }
+  if (!Array.isArray(layers) || layers.length === 0) {
+    return "Add at least one taxonomy layer before configuring sources";
+  }
+
+  for (const [index, source] of sources.entries()) {
+    const datasetId = Number(source?.datasetId);
+    const fieldName = String(source?.fieldName || "").trim();
+    const layerIndex = Number(source?.layerIndex);
+    if (!Number.isInteger(datasetId) || !fieldName || !Number.isInteger(layerIndex) || !layers[layerIndex]) {
+      return `Source ${index + 1} must specify a valid Tagged dataset, field, and taxonomy layer`;
+    }
+
+    const dataset = db.prepare("SELECT id, data_type, schema_json FROM datasets WHERE id = ?").get(datasetId);
+    if (!dataset) return `Source dataset ${datasetId} was not found`;
+    if (String(dataset.data_type || "").toLowerCase() !== "tagged") {
+      return `Source dataset "${datasetId}" must be Tagged; Raw datasets cannot be used for taxonomy refinement`;
+    }
+
+    const column = parseDatasetSchema(dataset.schema_json).find((item) => item?.name === fieldName);
+    if (!column || column.isAppAttribute || column.ontologyMapping === "_id") {
+      return `Source field "${fieldName}" was not found as an original field on the selected Tagged dataset`;
+    }
+  }
+  return null;
+}
+
 /* List all taxonomies */
 app.get("/taxonomies", (req, res) => {
   try {
@@ -5064,6 +5115,11 @@ app.post("/taxonomies", (req, res) => {
   try {
     const { name, description, layers, sources } = req.body;
 
+    const definitionLayers = Array.isArray(layers) ? layers : [];
+    const definitionSources = Array.isArray(sources) ? sources : [];
+    const sourceError = validateTaxonomySources(definitionSources, definitionLayers);
+    if (sourceError) return res.status(400).json({ success: false, message: sourceError });
+
     if (!name || !String(name).trim()) {
       return res.status(400).json({ success: false, message: "Taxonomy name is required" });
     }
@@ -5087,8 +5143,8 @@ app.post("/taxonomies", (req, res) => {
     `).run(
       trimmedName,
       String(description || "").trim() || null,
-      JSON.stringify(Array.isArray(layers) ? layers : []),
-      JSON.stringify(Array.isArray(sources) ? sources : [])
+      JSON.stringify(definitionLayers),
+      JSON.stringify(definitionSources)
     );
 
     const created = db.prepare(
@@ -5186,6 +5242,10 @@ app.put("/taxonomies/:id", (req, res) => {
 
     const validStatuses = ["draft", "complete"];
     const updatedStatus = validStatuses.includes(status) ? status : existing.status;
+    const definitionLayers = Array.isArray(layers) ? layers : JSON.parse(existing.layers_json || "[]");
+    const definitionSources = Array.isArray(sources) ? sources : JSON.parse(existing.sources_json || "[]");
+    const sourceError = validateTaxonomySources(definitionSources, definitionLayers);
+    if (sourceError) return res.status(400).json({ success: false, message: sourceError });
 
     db.prepare(`
       UPDATE taxonomies
@@ -5200,8 +5260,8 @@ app.put("/taxonomies/:id", (req, res) => {
     `).run(
       updatedName,
       description != null ? String(description).trim() || null : existing.description,
-      JSON.stringify(Array.isArray(layers) ? layers : JSON.parse(existing.layers_json || "[]")),
-      JSON.stringify(Array.isArray(sources) ? sources : JSON.parse(existing.sources_json || "[]")),
+      JSON.stringify(definitionLayers),
+      JSON.stringify(definitionSources),
       updatedStatus,
       id
     );
@@ -5369,6 +5429,11 @@ app.post("/taxonomies/:id/extract", (req, res) => {
 
     const layers = JSON.parse(taxonomy.layers_json || "[]");
     const sources = JSON.parse(taxonomy.sources_json || "[]");
+
+    const sourceValidationError = validateTaxonomySources(sources, layers);
+    if (sourceValidationError) {
+      return res.status(400).json({ success: false, message: sourceValidationError });
+    }
 
     if (!Array.isArray(sources) || sources.length === 0) {
       return res.status(400).json({
@@ -5668,7 +5733,27 @@ app.put("/taxonomies/:id/mappings", (req, res) => {
       return res.status(404).json({ success: false, message: "Taxonomy not found" });
     }
 
-    const { mappings } = req.body;
+    const { mappings, markAllReviewed } = req.body || {};
+
+    if (markAllReviewed === true) {
+      const updateAllReviewed = db.transaction(() => {
+        const result = db.prepare(`
+          UPDATE taxonomy_mappings
+          SET review_status = 'reviewed', updated_at = CURRENT_TIMESTAMP
+          WHERE taxonomy_id = ? AND review_status = 'unreviewed'
+        `).run(taxonomyId);
+        if (result.changes > 0) {
+          db.prepare(`
+            UPDATE taxonomies
+            SET version = version + 1, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `).run(taxonomyId);
+        }
+        return result.changes;
+      });
+
+      return res.json({ success: true, updatedCount: updateAllReviewed() });
+    }
 
     if (!Array.isArray(mappings)) {
       return res.status(400).json({ success: false, message: "mappings must be an array" });
@@ -5739,6 +5824,11 @@ app.post("/taxonomies/:id/complete", (req, res) => {
 
     const layers = JSON.parse(taxonomy.layers_json || "[]");
     const sources = JSON.parse(taxonomy.sources_json || "[]");
+
+    const sourceValidationError = validateTaxonomySources(sources, layers);
+    if (sourceValidationError) {
+      return res.status(400).json({ success: false, message: sourceValidationError });
+    }
 
     const validationErrors = [];
 
@@ -6018,9 +6108,149 @@ app.delete("/transforms/:id", (req, res) => {
       return res.status(404).json({ success: false, message: "Transform not found" });
     }
 
-    db.prepare("DELETE FROM transform_functions WHERE id = ?").run(id);
+    // 1. Gather all attribute names associated with this transform
+    const attrNamesToDelete = new Set();
+    if (existing.output_attribute_name) {
+      attrNamesToDelete.add(existing.output_attribute_name);
+      attrNamesToDelete.add(reviewFlagFieldName(existing.output_attribute_name));
+    }
 
-    return res.json({ success: true });
+    // Find all registered app attributes for this transform
+    const registeredAttrs = db.prepare(
+      "SELECT dataset_id, attribute_name FROM app_attributes WHERE transform_id = ?"
+    ).all(id);
+
+    for (const row of registeredAttrs) {
+      if (row.attribute_name) {
+        attrNamesToDelete.add(row.attribute_name);
+        attrNamesToDelete.add(reviewFlagFieldName(row.attribute_name));
+      }
+    }
+
+    // 2. Identify candidate datasets that could contain columns/data from this transform
+    const candidateDatasetIds = new Set();
+    if (existing.output_dataset_id) {
+      candidateDatasetIds.add(Number(existing.output_dataset_id));
+    }
+    for (const row of registeredAttrs) {
+      if (row.dataset_id) {
+        candidateDatasetIds.add(Number(row.dataset_id));
+      }
+    }
+
+    // Retrieve all datasets to ensure any dataset with schema containing this transform or attribute is cleaned
+    const allDatasets = db.prepare("SELECT id, schema_json, data_json FROM datasets").all();
+
+    // 3. Perform cleanup atomically in a transaction
+    const deleteTx = db.transaction(() => {
+      for (const ds of allDatasets) {
+        const isTarget = candidateDatasetIds.has(ds.id);
+        const schema = parseDatasetSchema(ds.schema_json);
+
+        // Determine which columns in this dataset belong to the deleted transform
+        const colsToRemove = new Set();
+        for (const col of schema) {
+          if (!col || !col.name) continue;
+          if (col.transformId === id) {
+            colsToRemove.add(col.name);
+          } else if (col.isAppAttribute && attrNamesToDelete.has(col.name)) {
+            colsToRemove.add(col.name);
+          } else if (isTarget && attrNamesToDelete.has(col.name)) {
+            colsToRemove.add(col.name);
+          }
+        }
+
+        if (colsToRemove.size > 0) {
+          // Remove from schema_json
+          const updatedSchema = schema.filter(
+            (col) => !colsToRemove.has(col.name) && col.transformId !== id
+          );
+
+          // Remove fields from data_json records
+          let records = [];
+          try {
+            records = JSON.parse(ds.data_json || "[]");
+          } catch {
+            records = [];
+          }
+
+          if (Array.isArray(records)) {
+            for (const record of records) {
+              if (record && typeof record === "object") {
+                for (const colName of colsToRemove) {
+                  if (colName in record) {
+                    delete record[colName];
+                  }
+                }
+              }
+            }
+          }
+
+          const sizeKB = Buffer.byteLength(JSON.stringify(records)) / 1024;
+          db.prepare(`
+            UPDATE datasets
+            SET data_json = ?,
+                schema_json = ?,
+                size_kb = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `).run(
+            JSON.stringify(records),
+            JSON.stringify(updatedSchema),
+            sizeKB,
+            ds.id
+          );
+
+          // Clean up view preferences for removed fields
+          try {
+            const pref = db.prepare(
+              "SELECT field_settings_json FROM dataset_view_preferences WHERE dataset_id = ?"
+            ).get(ds.id);
+            if (pref && pref.field_settings_json) {
+              const fs = JSON.parse(pref.field_settings_json || "{}");
+              let fsChanged = false;
+              for (const colName of colsToRemove) {
+                if (fs[colName] !== undefined) {
+                  delete fs[colName];
+                  fsChanged = true;
+                }
+              }
+              if (fsChanged) {
+                db.prepare(`
+                  UPDATE dataset_view_preferences
+                  SET field_settings_json = ?, updated_at = CURRENT_TIMESTAMP
+                  WHERE dataset_id = ?
+                `).run(JSON.stringify(fs), ds.id);
+              }
+            }
+          } catch (prefErr) {
+            console.warn("Clean view preferences warning:", prefErr);
+          }
+        }
+      }
+
+      // Delete from app_attributes table
+      db.prepare("DELETE FROM app_attributes WHERE transform_id = ?").run(id);
+
+      for (const dsId of candidateDatasetIds) {
+        for (const attr of attrNamesToDelete) {
+          db.prepare(
+            "DELETE FROM app_attributes WHERE dataset_id = ? AND attribute_name = ?"
+          ).run(dsId, attr);
+        }
+      }
+
+      // Finally delete from transform_functions table
+      db.prepare("DELETE FROM transform_functions WHERE id = ?").run(id);
+    });
+
+    deleteTx();
+
+    return res.json({
+      success: true,
+      message: "Transform function and associated field deleted successfully",
+      deletedAttributes: Array.from(attrNamesToDelete),
+    });
   } catch (error) {
     console.error("Delete transform error:", error);
     return res.status(500).json({ success: false, message: "Failed to delete transform" });
@@ -6049,20 +6279,24 @@ function loadMapperMappings(config) {
   const layerIndex = Number(config.layerIndex);
   const inputDatasetId = Number(config.inputDatasetId);
   const inputField = config.inputField;
+  if (!Number.isInteger(taxonomyId) || !Number.isInteger(layerIndex) || !Number.isInteger(inputDatasetId) || !inputField) {
+    throw new Error("Mapper requires a valid taxonomy, layer, input dataset, and input field");
+  }
+  const taxonomy = db.prepare("SELECT id, layers_json, sources_json FROM taxonomies WHERE id = ?").get(taxonomyId);
+  if (!taxonomy) throw new Error("Selected taxonomy was not found");
+  const layers = JSON.parse(taxonomy.layers_json || "[]");
+  const sources = JSON.parse(taxonomy.sources_json || "[]");
+  if (!layers[layerIndex]) throw new Error("Selected taxonomy layer does not exist");
+  const derivedLayer = layers[layerIndex]?.origin === "derived";
+  const sourceConfigured = sources.some((source) => Number(source.datasetId) === inputDatasetId && source.fieldName === inputField && Number(source.layerIndex) === layerIndex);
+  if (!sourceConfigured && !derivedLayer) throw new Error("Selected taxonomy layer is not configured for this dataset field");
 
-  let sql = `
-    SELECT raw_value, refined_value
+  return db.prepare(`
+    SELECT raw_value, refined_value, review_status
     FROM taxonomy_mappings
     WHERE taxonomy_id = ? AND layer_index = ?
-  `;
-  const params = [taxonomyId, layerIndex];
-
-  if (Number.isInteger(inputDatasetId) && inputField) {
-    sql += " AND source_dataset_id = ? AND source_field = ?";
-    params.push(inputDatasetId, String(inputField));
-  }
-
-  return db.prepare(sql).all(...params);
+      AND source_dataset_id = ? AND source_field = ?
+  `).all(taxonomyId, layerIndex, inputDatasetId, String(inputField));
 }
 
 function validateTransformConfig(functionType, config, outputDatasetId, outputAttributeName, transformId) {
@@ -6076,11 +6310,15 @@ function validateTransformConfig(functionType, config, outputDatasetId, outputAt
   }
 
   const outputDataset = db.prepare(
-    "SELECT id, schema_json FROM datasets WHERE id = ?"
+    "SELECT id, schema_json, data_type FROM datasets WHERE id = ?"
   ).get(Number(outputDatasetId));
 
   if (!outputDataset) {
     return "Output dataset not found";
+  }
+
+  if (String(outputDataset.data_type || "").toLowerCase() !== "tagged") {
+    return "Target dataset must be a tagged dataset";
   }
 
   const outputSchema = parseDatasetSchema(outputDataset.schema_json);
@@ -6117,11 +6355,15 @@ function validateTransformConfig(functionType, config, outputDatasetId, outputAt
     }
 
     const inputDataset = db.prepare(
-      "SELECT id, schema_json FROM datasets WHERE id = ?"
+      "SELECT id, schema_json, data_type FROM datasets WHERE id = ?"
     ).get(Number(config.inputDatasetId));
 
     if (!inputDataset) {
       return "Input dataset not found";
+    }
+
+    if (String(inputDataset.data_type || "").toLowerCase() !== "tagged") {
+      return "Input dataset must be a tagged dataset";
     }
 
     const inputSchema = parseDatasetSchema(inputDataset.schema_json);
@@ -6177,11 +6419,15 @@ function validateTransformConfig(functionType, config, outputDatasetId, outputAt
     }
 
     const inputDataset = db.prepare(
-      "SELECT id, schema_json FROM datasets WHERE id = ?"
+      "SELECT id, schema_json, data_type FROM datasets WHERE id = ?"
     ).get(Number(config.inputDatasetId));
 
     if (!inputDataset) {
       return "Input dataset not found";
+    }
+
+    if (String(inputDataset.data_type || "").toLowerCase() !== "tagged") {
+      return "Input dataset must be a tagged dataset";
     }
 
     const inputSchema = parseDatasetSchema(inputDataset.schema_json);
@@ -6301,7 +6547,9 @@ app.post("/transforms/:id/preview", (req, res) => {
 
     let previewResult;
     if (transform.function_type === "string_mapper") {
-      previewResult = applyStringMapper(sample, config);
+      const validationError = validateTransformConfig(transform.function_type, config, transform.output_dataset_id, transform.output_attribute_name, id);
+      if (validationError) return res.status(400).json({ success: false, message: validationError });
+      previewResult = runTransform(transform.function_type, sample, config);
     } else if (transform.function_type === "column_combiner") {
       previewResult = applyColumnCombiner(sample, config);
     } else {
@@ -6403,7 +6651,9 @@ app.post("/transforms/:id/execute", (req, res) => {
        or by _id when different datasets */
     let transformResult;
     if (transform.function_type === "string_mapper") {
-      transformResult = applyStringMapper(inputRecords, config);
+      const validationError = validateTransformConfig(transform.function_type, config, outputDatasetId, outputAttr, id);
+      if (validationError) return res.status(400).json({ success: false, message: validationError });
+      transformResult = runTransform(transform.function_type, inputRecords, config);
     } else if (transform.function_type === "column_combiner") {
       transformResult = applyColumnCombiner(inputRecords, config);
     } else {
@@ -6445,7 +6695,7 @@ app.post("/transforms/:id/execute", (req, res) => {
     const newSchemaCol = {
       name: outputAttr,
       type: transformResult.results.some(
-        (result) => Array.isArray(result.output)
+        (result) => Array.isArray(transform.function_type === "string_mapper" ? result.refinedOutput : result.output)
       ) ? "list" : "text",
       ontologyMapping: "",
       isAppAttribute: true,

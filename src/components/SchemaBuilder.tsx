@@ -476,15 +476,45 @@ export default function SchemaBuilder({
               ? initialData
                   .slice(0, 3)
                   .map((row: any) => row[sc.name || sc.column_name])
+                  .filter((v: any) => v !== undefined && v !== null && v !== "")
                   .join(", ")
               : "",
 
         })
       );
 
-      if (existingCols.length > 0) {
-        setColumns(existingCols);
-        runPreviewRefresh(existingCols);
+      const existingNames = new Set(existingCols.map((c) => c.name));
+      const newCols: Column[] = [];
+      if (initialData && initialData.length > 0) {
+        Object.keys(initialData[0]).forEach((key) => {
+          if (!existingNames.has(key)) {
+            const isList = initialData.some((r: any) => {
+              const val = r?.[key];
+              if (Array.isArray(val)) return true;
+              const str = String(val ?? "").trim();
+              return str.startsWith("[") && str.endsWith("]");
+            });
+            newCols.push({
+              name: key,
+              type: isList ? "list" : "string",
+              ontologyMapping: "" as OntologyType,
+              error: "",
+              include: true,
+              sample: initialData
+                .slice(0, 3)
+                .map((row: any) => row[key])
+                .filter((v: any) => v !== undefined && v !== null && v !== "")
+                .join(", "),
+            });
+          }
+        });
+      }
+
+      const combinedCols = [...existingCols, ...newCols];
+
+      if (combinedCols.length > 0) {
+        setColumns(combinedCols);
+        runPreviewRefresh(combinedCols);
       }
 
       setRefreshError(null);
@@ -2962,7 +2992,14 @@ export default function SchemaBuilder({
                       "1px solid #334155",
                   }}
                 >
-                  {column.name}
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span>{column.name}</span>
+                    {refreshDatasetId && refreshPreviewResult?.addedColumns?.includes(column.name) && (
+                      <span className="badge badge-cyan" style={{ fontSize: 10, padding: "2px 6px" }}>
+                        NEW COLUMN
+                      </span>
+                    )}
+                  </div>
                 </td>
 
                 {/* SAMPLE VALUES */}
@@ -2999,7 +3036,7 @@ export default function SchemaBuilder({
                     }
 
                     disabled={
-                      !!refreshDatasetId
+                      !!refreshDatasetId && !refreshPreviewResult?.addedColumns?.includes(column.name)
                     }
 
                     onChange={() =>
@@ -3042,7 +3079,7 @@ export default function SchemaBuilder({
                     }
 
                     disabled={
-                      !!refreshDatasetId
+                      !!refreshDatasetId && !refreshPreviewResult?.addedColumns?.includes(column.name)
                     }
 
                     onChange={(
@@ -3126,7 +3163,7 @@ export default function SchemaBuilder({
                     }
 
                     disabled={
-                      !!refreshDatasetId
+                      !!refreshDatasetId && !refreshPreviewResult?.addedColumns?.includes(column.name)
                     }
 
                     onChange={(

@@ -471,11 +471,13 @@ export default function DataIngestion({
 
   }
 
-  function handleCreateNewDataset() {
+  function handleCreateNewDataset(type?: "raw" | "tagged") {
 
     clearRefreshMode();
     setDatasetName("");
-    setIngestionType("raw");
+    if (type) {
+      setIngestionType(type);
+    }
     setParentDatasetId(null);
 
   }
@@ -886,6 +888,14 @@ export default function DataIngestion({
               setStep(2)
             }
 
+            ingestionType={
+              ingestionType
+            }
+
+            setIngestionType={
+              handleIngestionTypeChange
+            }
+
             onSelectRefreshDataset={
               handleSelectRefreshDataset
             }
@@ -896,6 +906,10 @@ export default function DataIngestion({
 
             selectedRefreshDatasetId={
               refreshDatasetId
+            }
+
+            selectedRefreshDatasetMeta={
+              refreshDatasetMeta
             }
 
           />
@@ -1004,6 +1018,10 @@ export default function DataIngestion({
 
             clearRefreshMode={
               clearRefreshMode
+            }
+
+            onSelectRefreshDataset={
+              handleSelectRefreshDataset
             }
 
           />

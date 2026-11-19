@@ -257,7 +257,9 @@ function TaxonomyEditor({
   const [srcField, setSrcField] = useState("");
   const [srcLayerIndex, setSrcLayerIndex] = useState(0);
 
-  const selectedDataset = datasets.find((d) => d.id === srcDatasetId);
+  const taggedDatasets = datasets.filter((dataset) => String(dataset.data_type || "").toLowerCase() === "tagged");
+
+  const selectedDataset = taggedDatasets.find((d) => d.id === srcDatasetId);
   const availableFields = (selectedDataset?.schema_json || []).filter(
     (col) => !col.isAppAttribute && col.ontologyMapping !== "_id"
   );
@@ -303,7 +305,7 @@ function TaxonomyEditor({
 
   function addSource() {
     if (srcDatasetId === null || !srcField) return;
-    const ds = datasets.find((d) => d.id === srcDatasetId);
+    const ds = taggedDatasets.find((d) => d.id === srcDatasetId);
     if (!ds) return;
 
     /* Check duplicate */
@@ -334,6 +336,10 @@ function TaxonomyEditor({
     }
     if (layers.some((l) => !l.name.trim())) {
       setError("All layers must have a name");
+      return;
+    }
+    if (sources.length === 0) {
+      setError("Add at least one source dataset and field before saving the taxonomy.");
       return;
     }
     setSaving(true);
@@ -497,9 +503,9 @@ function TaxonomyEditor({
               style={{ width: "100%", fontSize: 13 }}
             >
               <option value="">Select dataset…</option>
-              {datasets.map((d) => (
+              {taggedDatasets.map((d) => (
                 <option key={d.id} value={d.id}>
-                  {d.dataset_name} ({d.data_type})
+                  {d.dataset_name} (Tagged)
                 </option>
               ))}
             </select>
@@ -532,14 +538,14 @@ function TaxonomyEditor({
               ))}
             </select>
           </div>
-          <button className="btn-secondary" onClick={addSource} style={{ fontSize: 12, padding: "8px 14px" }}>
+          <button className="btn-secondary" onClick={addSource} disabled={srcDatasetId === null || !srcField} style={{ fontSize: 12, padding: "8px 14px" }}>
             + Add Source
           </button>
         </div>
 
         {sources.length === 0 ? (
           <div style={{ textAlign: "center", padding: "20px 0", color: "var(--text-muted)", fontSize: 13 }}>
-            No sources configured yet
+            Add at least one Tagged dataset field before saving this taxonomy.
           </div>
         ) : (
           <div className="table-container">
@@ -578,16 +584,16 @@ function TaxonomyEditor({
       {/* Actions */}
       <div style={{ display: "flex", gap: 12, justifyContent: "flex-end" }}>
         <button className="btn-secondary" onClick={onCancel} disabled={saving}>Cancel</button>
-        <button className="btn-secondary" onClick={() => handleSave("draft")} disabled={saving}>
+        <button className="btn-secondary" onClick={() => handleSave("draft")} disabled={saving || sources.length === 0}>
           {saving ? "Saving…" : "Save as Draft"}
         </button>
         {isEditing && (
-          <button className="btn-primary" onClick={() => handleSave("complete")} disabled={saving}>
+          <button className="btn-primary" onClick={() => handleSave("complete")} disabled={saving || sources.length === 0}>
             {saving ? "Saving…" : "Save & Continue to Workspace →"}
           </button>
         )}
         {!isEditing && (
-          <button className="btn-primary" onClick={() => handleSave("draft")} disabled={saving}>
+          <button className="btn-primary" onClick={() => handleSave("draft")} disabled={saving || sources.length === 0}>
             {saving ? "Creating…" : "Create Taxonomy"}
           </button>
         )}
@@ -611,6 +617,7 @@ function RefinementWorkspace({
 }) {
   const [mappings, setMappings] = useState<TaxonomyMapping[]>([]);
   const [total, setTotal] = useState(0);
+  const [mappingStats, setMappingStats] = useState({ total: 0, reviewed: 0, unreviewed: 0, unmapped: 0 });
   const [page, setPage] = useState(1);
   const [pageSize] = useState(100);
   const [loading, setLoading] = useState(false);
@@ -644,6 +651,7 @@ function RefinementWorkspace({
       if (data.success) {
         setMappings(data.mappings);
         setTotal(data.total);
+        setMappingStats(data.stats || { total: data.total || 0, reviewed: 0, unreviewed: 0, unmapped: 0 });
       }
     } catch {
       setError("Failed to load mappings");
@@ -747,6 +755,28 @@ function RefinementWorkspace({
     }
   }
 
+  async function markAllReviewed() {
+    if (mappingStats.unreviewed === 0) return;
+    setSavingMappings(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API}/taxonomies/${taxonomy.id}/mappings`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ markAllReviewed: true }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.message || "Failed to mark mappings reviewed");
+      await loadMappings();
+      setSuccessMsg(`${data.updatedCount} mapping${data.updatedCount === 1 ? "" : "s"} marked as reviewed`);
+      setTimeout(() => setSuccessMsg(null), 4000);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSavingMappings(false);
+    }
+  }
+
   async function completeTaxonomy() {
     setCompleting(true);
     setError(null);
@@ -769,7 +799,8 @@ function RefinementWorkspace({
     }
   }
 
-  const reviewed = mappings.filter((m) => m.review_status === "reviewed").length;
+  const reviewed = Number(mappingStats.reviewed) || 0;
+  const pendingReview = Number(mappingStats.unreviewed) || 0;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const allPageSelected = mappings.length > 0 && mappings.every((m) => selected.has(m.id));
 
@@ -813,6 +844,7 @@ function RefinementWorkspace({
             className="btn-secondary"
             onClick={extract}
             disabled={extracting || taxonomy.sources.length === 0}
+            title={taxonomy.sources.length === 0 ? "Add a source dataset and field to this taxonomy before extracting entities." : undefined}
             id="extract-entities-btn"
           >
             {extracting ? "Extracting…" : "Extract Entities"}
@@ -828,6 +860,12 @@ function RefinementWorkspace({
           )}
         </div>
       </div>
+
+      {taxonomy.sources.length === 0 && (
+        <div style={{ padding: "0 32px", marginTop: 10, color: "var(--text-muted)", fontSize: 12 }}>
+          Entity extraction is disabled because this taxonomy has no source configured. Edit the taxonomy, add a dataset and field under “Source Datasets &amp; Fields,” then save it before extracting.
+        </div>
+      )}
 
       {/* Messages */}
       {(error || successMsg || extractResult) && (
@@ -850,9 +888,12 @@ function RefinementWorkspace({
       <div style={{ padding: "14px 32px", flexShrink: 0, borderBottom: "1px solid var(--border-subtle)", display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
         {/* Stats */}
         <div style={{ display: "flex", gap: 20, fontSize: 13 }}>
-          <span style={{ color: "var(--text-muted)" }}>Total: <strong style={{ color: "var(--text-primary)" }}>{total}</strong></span>
+          <span style={{ color: "var(--text-muted)" }}>Total: <strong style={{ color: "var(--text-primary)" }}>{mappingStats.total || total}</strong></span>
           <span style={{ color: "var(--text-muted)" }}>Reviewed: <strong style={{ color: "#10B981" }}>{reviewed}</strong></span>
-          <span style={{ color: "var(--text-muted)" }}>Pending: <strong style={{ color: "#F59E0B" }}>{total - reviewed}</strong></span>
+          <span style={{ color: "var(--text-muted)" }}>Pending: <strong style={{ color: "#F59E0B" }}>{pendingReview}</strong></span>
+          <button className="btn-secondary" style={{ fontSize: 12, padding: "6px 12px" }} onClick={markAllReviewed} disabled={savingMappings || pendingReview === 0}>
+            {savingMappings ? "Saving…" : "Mark All as Reviewed"}
+          </button>
         </div>
 
         {/* Filters */}
